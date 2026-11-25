@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fat Facts</title>
+<meta name="description" content="Scan a nutrition label and see what percent of its calories come from fat.">
+<meta name="theme-color" id="themeColor" content="#e7e9e2">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fat Facts">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..900&display=swap">
+<style>
+  /* The whole app is one Nutrition Facts panel: black ink on white paper, heavy
+     grotesque type, thick and thin rules. The paper never changes colour; the
+     shelf behind it and the panel's thick rule carry the verdict. */
+  :root {
+    --ink: #000000;
+    --paper: #ffffff;
+    --well: #eeefea;          /* fill behind editable numbers */
+    --shelf: #e7e9e2;         /* page, no result yet */
+    --shelf-pass: #c9e9d2;
+    --shelf-fail: #f6d0c9;
+    --pass: #0a7a3d;
+    --fail: #c5261c;
+    --on-shelf: #000000;
+    --on-shelf-soft: #3d423c;
+    --focus: #1857f0;
+    --page: var(--shelf);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --shelf: #1a1c19;
+      --shelf-pass: #0e3b23;
+      --shelf-fail: #4b1611;
+      --on-shelf: #ffffff;
+      --on-shelf-soft: #c3c8c0;
+      --focus: #8fb4ff;
+    }
+  }
+  body.pass { --page: var(--shelf-pass); }
+  body.fail { --page: var(--shelf-fail); }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--page); color: var(--on-shelf);
+    font: 400 16px/1.35 Archivo, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-stretch: 100%;
+    padding: max(14px, env(safe-area-inset-top)) 14px max(22px, env(safe-area-inset-bottom));
+    transition: background-color .25s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  main { max-width: 430px; margin: 0 auto; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+  /* ---------- the panel ---------- */
+  .panel { background: var(--paper); color: var(--ink); border: 2px solid var(--ink); padding: 6px 12px 10px; }
+  .title {
+    margin: 0; font-weight: 900; line-height: .95; letter-spacing: -.035em;
+    font-size: clamp(40px, 14.4vw, 62px); font-variant-numeric: tabular-nums;
+  }
+  .has-result .title { font-size: clamp(64px, 23vw, 100px); letter-spacing: -.05em; line-height: .88; padding-top: 4px; }
+  .lede { margin: 4px 0 8px; font-size: 17px; }
+  .has-result .lede { font-weight: 800; font-size: 19px; }
+
+  /* The thick rule under the heading. With a result it becomes the verdict. */
+  .verdict { background: var(--ink); color: #fff; min-height: 10px; font-weight: 800; font-size: 19px; line-height: 1.2; }
+  .verdict:not(:empty) { padding: 9px 10px; }
+  .pass .verdict { background: var(--pass); }
+  .fail .verdict { background: var(--fail); }
+
+  .per { margin: 8px 0 0; font-weight: 800; font-size: 15px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--ink); }
+  .row.first { border-top: 0; padding-top: 0; }
+  .row.heavy { border-top-width: 5px; }
+  .row label { font-weight: 800; font-size: 19px; }
+  .row.first label { font-weight: 900; font-size: 30px; letter-spacing: -.02em; }
+  .row.sub { padding-left: 18px; font-size: 17px; }
+  .row.sub output { font-weight: 800; font-variant-numeric: tabular-nums; }
+  .entry { display: flex; align-items: center; gap: 8px; }
+
+  .panel input {
+    font: inherit; font-weight: 900; font-size: 26px; font-variant-numeric: tabular-nums;
+    width: 92px; padding: 3px 8px; text-align: right;
+    color: var(--ink); background: var(--well); border: 0; border-bottom: 2px solid var(--ink); border-radius: 0;
+  }
+  .row.first input { font-size: 38px; width: 124px; letter-spacing: -.02em; }
+  .panel input::placeholder { color: #8b8f86; }
+
+  .unit { display: flex; border: 2px solid var(--ink); }
+  .unit button {
+    font: inherit; font-weight: 800; font-size: 16px; min-width: 40px; padding: 7px 6px;
+    background: var(--paper); color: var(--ink); border: 0; border-radius: 0; cursor: pointer;
+  }
+  .unit button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+
+  .note { margin: 0; padding-top: 8px; border-top: 10px solid var(--ink); font-size: 14px; line-height: 1.3; }
+
+  /* ---------- controls outside the panel ---------- */
+  .actions { display: flex; gap: 10px; margin-top: 14px; }
+  .actions button {
+    font: inherit; font-weight: 800; font-size: 19px; border-radius: 999px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 58px;
+  }
+  .scan { flex: 1; background: var(--on-shelf); color: var(--page); border: 0; transition: color .25s; }
+  .pick { width: 58px; background: transparent; color: var(--on-shelf); border: 2px solid var(--on-shelf); }
+  .actions button:disabled { opacity: .5; cursor: default; }
+  svg { width: 24px; height: 24px; flex: none; }
+
+  .status { display: none; align-items: center; gap: 12px; margin-top: 14px; font-size: 16px; }
+  .status.show { display: flex; }
+  .status img { width: 48px; height: 48px; object-fit: cover; border: 2px solid var(--on-shelf); flex: none; }
+  .status.warn #statusText { font-weight: 800; }
+  .progress { height: 5px; margin-top: 6px; border: 1px solid var(--on-shelf); display: none; }
+  .busy .progress { display: block; }
+  .progress i { display: block; height: 100%; width: 0; background: var(--on-shelf); transition: width .2s; }
+
+  .clear {
+    display: block; margin: 14px 0 0 auto; padding: 10px 2px; font: inherit; font-size: 16px; font-weight: 800;
+    background: none; border: 0; color: var(--on-shelf-soft); text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
+  }
+  /* ---------- in-app camera ---------- */
+  .camera { position: fixed; inset: 0; z-index: 10; background: #000; color: #fff; display: flex; flex-direction: column; }
+  .camera video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .camera .hint {
+    position: relative; margin: 0; padding: max(16px, env(safe-area-inset-top)) 16px 12px;
+    font-weight: 800; font-size: 19px; text-align: center; background: #000;
+  }
+  .camera .frame { position: relative; flex: 1; margin: 18px; border: 3px solid #fff; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .45); }
+  .camera .bar {
+    position: relative; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+    padding: 14px 16px max(18px, env(safe-area-inset-bottom)); background: #000;
+  }
+  .camera button { font: inherit; cursor: pointer; }
+  .camera .cancel { justify-self: start; background: none; border: 0; color: #fff; font-weight: 800; font-size: 19px; padding: 14px 6px; }
+  .camera .shutter { width: 76px; height: 76px; border-radius: 50%; background: #fff; border: 5px solid #000; box-shadow: 0 0 0 4px #fff; }
+  .camera .shutter:active { background: #cfcfcf; }
+  .camera :focus-visible { outline-color: #8fb4ff; outline-offset: 6px; }
+  body.camera-open { overflow: hidden; }
+
+  [hidden] { display: none !important; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <section class="panel" id="panel">
+    <div aria-live="polite">
+      <h1 class="title" id="pct">Fat Facts</h1>
+      <p class="lede" id="lede">Scan a label, or type its calories and total fat.</p>
+      <div class="verdict" id="verdict"></div>
+    </div>
+
+    <p class="per">Amount per serving</p>
+    <div class="row first">
+      <label for="cal">Calories</label>
+      <input id="cal" type="text" inputmode="decimal" autocomplete="off" placeholder="0">
+    </div>
+    <div class="row heavy">
+      <label for="fat">Total Fat</label>
+      <span class="entry">
+        <input id="fat" type="text" inputmode="decimal" autocomplete="off" placeholder="0">
+        <span class="unit" role="group" aria-label="Total fat is in">
+          <button type="button" id="unitG" aria-pressed="true" aria-label="grams">g</button>
+          <button type="button" id="unitCal" aria-pressed="false" aria-label="calories">cal</button>
+        </span>
+      </span>
+    </div>
+    <div class="row sub"><span id="convLabel">Calories from fat</span><output id="conv">0</output></div>
+    <div class="row sub"><span>Most fat that stays at 20%</span><output id="maxFat">0 g</output></div>
+    <p class="note">1 g of fat has 9 calories. Labels round their numbers, so the result is close, not exact.</p>
+  </section>
+
+  <div class="actions">
+    <button class="scan" id="scanBtn" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square" aria-hidden="true"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><path d="M8 9h8M8 12h8M8 15h5"/></svg>
+      Scan label
+    </button>
+    <button class="pick" id="pickBtn" type="button" aria-label="Choose a photo of a label">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16"/><circle cx="9" cy="10" r="1.5"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg>
+    </button>
+  </div>
+  <input class="visually-hidden" id="fileInput" type="file" accept="image/*" tabindex="-1" aria-hidden="true">
+
+  <div class="status" id="status" aria-live="polite">
+    <img id="thumb" alt="" hidden>
+    <div style="flex:1">
+      <span id="statusText"></span>
+      <div class="progress"><i id="barFill"></i></div>
+    </div>
+  </div>
+
+  <button class="clear" type="button" id="clearBtn" hidden>Clear numbers</button>
+</main>
+
+<div class="camera" id="camera" role="dialog" aria-modal="true" aria-label="Scan a label" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <p class="hint">Fill the box with the label, then tap the button</p>
+  <div class="frame" aria-hidden="true"></div>
+  <div class="bar">
+    <button class="cancel" id="camCancel" type="button">Cancel</button>
+    <button class="shutter" id="shutter" type="button" aria-label="Read this label"></button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+<script>
+(() => {
+  const LIMIT = 20; // percent of calories from fat
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    panel: $('panel'), pct: $('pct'), lede: $('lede'), verdict: $('verdict'),
+    cal: $('cal'), fat: $('fat'), unitG: $('unitG'), unitCal: $('unitCal'),
+    convLabel: $('convLabel'), conv: $('conv'), maxFat: $('maxFat'), clear: $('clearBtn'),
+    status: $('status'), statusText: $('statusText'), thumb: $('thumb'), bar: $('barFill'),
+    scanBtn: $('scanBtn'), pickBtn: $('pickBtn'), file: $('fileInput'),
+    camera: $('camera'), video: $('video'), shutter: $('shutter'), camCancel: $('camCancel'),
+    theme: $('themeColor'),
+  };
+  let fatUnit = 'g';
+
+  // ---------- math ----------
+  const num = (s) => {
+    const v = parseFloat(String(s).replace(',', '.'));
+    return Number.isFinite(v) && v >= 0 ? v : null;
+  };
+  const fmt = (v) => (Math.round(v * 10) / 10).toString();
+
+  function show(state, title, lede, verdict) {
+    document.body.className = state;
+    els.panel.className = 'panel ' + state + (state ? ' has-result' : '');
+    els.pct.textContent = title;
+    els.lede.textContent = lede;
+    els.verdict.textContent = verdict;
+    els.theme.content = getComputedStyle(document.body).getPropertyValue('--page').trim();
+  }
+
+  function calc() {
+    const cal = num(els.cal.value), fat = num(els.fat.value);
+    els.clear.hidden = els.cal.value === '' && els.fat.value === '';
+
+    const fatCal = fat === null ? null : (fatUnit === 'g' ? fat * 9 : fat);
+    els.convLabel.textContent = fatUnit === 'g' ? 'Calories from fat' : 'Fat in grams';
+    els.conv.textContent = fat === null ? '0' : (fatUnit === 'g' ? fmt(fatCal) : fmt(fat / 9) + ' g');
+    els.maxFat.textContent = (cal === null ? '0' : fmt(cal * LIMIT / 100 / 9)) + ' g';
+
+    if (cal === null || fat === null) {
+      const missing = cal === null && fat === null ? 'Scan a label, or type its calories and total fat.'
+        : cal === null ? 'Add the calories to see the result.' : 'Add the total fat to see the result.';
+      return show('', 'Fat Facts', missing, '');
+    }
+    if (cal === 0 && fatCal === 0) return show('pass', '0%', 'of calories from fat', `✓ At or under the ${LIMIT}% limit`);
+    const pct = cal === 0 ? Infinity : (fatCal / cal) * 100;
+    // Rounding on real labels can push fat a little past the total (cooking spray, oils).
+    if (pct > 115) return show('', 'Fat Facts', 'The fat adds up to more calories than the total. Check both numbers.', '');
+    const pass = pct <= LIMIT;
+    show(pass ? 'pass' : 'fail', fmt(Math.min(pct, 100)) + '%', 'of calories from fat',
+      pass ? `✓ At or under the ${LIMIT}% limit` : `✕ Over the ${LIMIT}% limit`);
+  }
+
+  function setUnit(u) {
+    fatUnit = u;
+    els.unitG.setAttribute('aria-pressed', u === 'g');
+    els.unitCal.setAttribute('aria-pressed', u === 'cal');
+    calc();
+  }
+
+  // ---------- reading numbers out of OCR text ----------
+  const DIGITISH = '[0-9OoIl|]';
+  const fixDigits = (s) => s.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1').replace(',', '.');
+
+  function parseLabel(text) {
+    const out = { calories: null, fatG: null, fatCal: null };
+    const t = text.replace(/\r/g, '');
+
+    // Older labels: "Calories from Fat 110"
+    let m = /calories\s*from\s*fat\D{0,6}?(\d{1,4})/i.exec(t);
+    if (m) out.fatCal = Number(m[1]);
+
+    // "Calories 230" (skip "Calories from Fat" and the "2,000 calorie diet" footnote)
+    const calRe = /calories(?!\s*from)(?!\s*per\s*gram)[^\d]{0,20}?(\d{1,4})(?![\d]*,\d{3})/gi;
+    while ((m = calRe.exec(t))) {
+      const v = Number(m[1]);
+      if (v <= 2500) { out.calories = v; break; }
+    }
+    // UK/EU style: "Energy 250 kcal"
+    if (out.calories === null && (m = /(\d{1,4})\s*kcal/i.exec(t))) out.calories = Number(m[1]);
+
+    // "Total Fat 8g 10%"
+    const fatRe = new RegExp(
+      `(?:total\\s*fat|^\\s*fat)\\s*[:.]?\\s*(${DIGITISH}+(?:[.,]${DIGITISH}+)?)\\s*(mg|g|q)?(?=\\s|\\d*\\s*%|$)([^\\n]*)`, 'im');
+    m = fatRe.exec(t);
+    if (m) {
+      // OCR makes two common mistakes here: it reads the "g" as a 9 ("8g" -> "89",
+      // "2.5g" -> "2.59") and it splits digits apart ("19g" -> "1 9g"). So collect
+      // every plausible reading, then let the % Daily Value on the same line decide.
+      const cands = [];
+      const add = (rawNum, unit) => {
+        let v = parseFloat(rawNum);
+        if (!Number.isFinite(v)) return;
+        if (unit === 'mg') v /= 1000;
+        const decimals = (rawNum.split('.')[1] || '').length;
+        if (decimals < 2) cands.push(v);                       // labels never print 2 decimals
+        if (!unit && /\d9$/.test(rawNum)) cands.push(parseFloat(rawNum.slice(0, -1)));
+      };
+      const unit = (m[2] || '').toLowerCase();
+      add(fixDigits(m[1]), unit);
+
+      const rest = m[1] + (m[2] || '') + (m[3] || '');
+      const dv = /(\d{1,3})\s*%/.exec(m[3] || '');
+      if (dv) {
+        const seg = rest.slice(0, rest.lastIndexOf(dv[0]));
+        const joined = /^(\d+(?:\.\d+)?)(mg|g|q)?$/i.exec(fixDigits(seg.replace(/\s+/g, '')));
+        if (joined) add(joined[1], (joined[2] || '').toLowerCase());
+        const want = Number(dv[1]);
+        // Daily value for fat is 78 g on current labels and was 65 g on older ones.
+        const err = (x) => Math.min(Math.abs(x / 78 * 100 - want), Math.abs(x / 65 * 100 - want));
+        cands.sort((a, b) => err(a) - err(b));
+      } else if (cands.length > 1 && out.calories !== null && cands[0] * 9 > out.calories * 1.1) {
+        cands.reverse();
+      }
+      if (cands.length) out.fatG = cands[0];
+    }
+
+    // Cross-check: carbs and protein have 4 calories per gram, fat has 9. If the label's
+    // own numbers add up to something far from the calories we read, say so.
+    const grams = (re) => { const g = re.exec(t); return g ? parseFloat(g[1]) : null; };
+    const carb = grams(/total\s*carb[a-z.]*\s*(\d{1,3}(?:\.\d)?)\s*g\b/i);
+    const protein = grams(/protein\s*(\d{1,3}(?:\.\d)?)\s*g\b/i);
+    if (carb !== null && protein !== null && out.fatG !== null) out.estimate = Math.round(carb * 4 + protein * 4 + out.fatG * 9);
+    return out;
+  }
+
+  // ---------- scanning ----------
+  let workerPromise = null;
+  function setStatus(msg, { warn = false, busy = false, progress = null } = {}) {
+    els.status.classList.add('show');
+    els.status.classList.toggle('warn', warn);
+    els.status.classList.toggle('busy', busy);
+    els.statusText.textContent = msg;
+    if (progress !== null) els.bar.style.width = Math.round(progress * 100) + '%';
+  }
+
+  function getWorker() {
+    if (!window.Tesseract) return Promise.reject(new Error('The label reader didn’t load. Connect to the internet and reload, or type the numbers.'));
+    if (!workerPromise) {
+      workerPromise = Tesseract.createWorker('eng', 1, {
+        logger: (m) => {
+          if (!els.status.classList.contains('busy')) return;
+          if (m.status === 'recognizing text') setStatus('Reading the label…', { busy: true, progress: m.progress });
+          else if (/load/.test(m.status)) setStatus('Setting up the label reader. This happens once.', { busy: true, progress: m.progress || 0 });
+        },
+      });
+      workerPromise.catch(() => { workerPromise = null; });
+    }
+    return workerPromise;
+  }
+
+  // Small text is where digits get misread, so bring every photo to a size where
+  // label text is comfortably large: shrink huge photos, enlarge small ones.
+  function sized(src, w, h) {
+    const long = Math.max(w, h);
+    const scale = Math.min(2200, Math.max(1700, long)) / long;
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * scale);
+    c.height = Math.round(h * scale);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, c.width, c.height);
+    return c;
+  }
+
+  async function fileToCanvas(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return sized(img, img.naturalWidth, img.naturalHeight);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function scan(source) {
+    els.scanBtn.disabled = els.pickBtn.disabled = true;
+    els.thumb.hidden = true;
+    setStatus('Opening the photo…', { busy: true, progress: 0 });
+    try {
+      const canvas = source instanceof HTMLCanvasElement ? sized(source, source.width, source.height) : await fileToCanvas(source);
+      els.thumb.src = canvas.toDataURL('image/jpeg', 0.6);
+      els.thumb.hidden = false;
+      const worker = await getWorker();
+      window.fatApp.lastTexts = [];
+      const found = { calories: null, fatG: null, fatCal: null, estimate: null };
+      const done = () => found.calories !== null && (found.fatG !== null || found.fatCal !== null);
+      // Try a few page layouts; labels photographed at an angle read differently in each.
+      for (const psm of ['6', '11', '3']) {
+        await worker.setParameters({ tessedit_pageseg_mode: psm });
+        const { data } = await worker.recognize(canvas);
+        window.fatApp.lastTexts.push(data.text);
+        const p = parseLabel(data.text);
+        for (const k of Object.keys(found)) if (found[k] === null) found[k] = p[k];
+        if (done()) break;
+      }
+      applyScan(found);
+      return found;
+    } catch (err) {
+      setStatus(err && err.message ? err.message : 'That photo couldn’t be read. Scan again, or type the numbers.', { warn: true });
+    } finally {
+      els.scanBtn.disabled = els.pickBtn.disabled = false;
+    }
+  }
+
+  function applyScan(found) {
+    const hasFat = found.fatG !== null || found.fatCal !== null;
+    if (found.calories !== null) els.cal.value = found.calories;
+    if (found.fatCal !== null) { els.fat.value = found.fatCal; setUnit('cal'); }
+    else if (found.fatG !== null) { els.fat.value = found.fatG; setUnit('g'); }
+    calc();
+    const est = found.estimate;
+    if (found.calories !== null && hasFat && est != null && Math.abs(est - found.calories) > Math.max(30, found.calories * 0.35)) {
+      setStatus(`Read ${found.calories} calories, but the carbs, protein and fat on the label add up to about ${est}. Check the calories against the label.`, { warn: true });
+      els.cal.focus();
+    } else if (found.calories !== null && hasFat) {
+      const fatTxt = found.fatCal !== null ? `${found.fatCal} calories from fat` : `${found.fatG} g of fat`;
+      setStatus(`Read ${found.calories} calories and ${fatTxt}. Check them against the label.`);
+    } else if (found.calories === null && !hasFat) {
+      setStatus('No numbers found in that photo. Move closer, avoid glare and scan again, or type them in.', { warn: true });
+    } else {
+      const missing = found.calories === null ? 'calories' : 'total fat';
+      setStatus(`The ${missing} didn’t come through. Type it in, or scan again.`, { warn: true });
+      (found.calories === null ? els.cal : els.fat).focus();
+    }
+  }
+
+  // ---------- wiring ----------
+  els.cal.addEventListener('input', calc);
+  els.fat.addEventListener('input', calc);
+  els.unitG.addEventListener('click', () => setUnit('g'));
+  els.unitCal.addEventListener('click', () => setUnit('cal'));
+  // ---------- in-app camera ----------
+  // The live camera runs inside the page. Tapping the button copies one video frame
+  // into memory for reading; nothing is saved to the phone's photos or sent anywhere.
+  let stream = null;
+
+  async function openCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return setStatus('This browser can’t open the camera here. Use the photo button, or type the numbers.', { warn: true });
+    }
+    els.scanBtn.disabled = true;
+    els.thumb.hidden = true;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      });
+    } catch (err) {
+      els.scanBtn.disabled = false;
+      const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+      return setStatus(denied
+        ? 'The camera is turned off for this app. Allow it in your browser’s site settings, or type the numbers.'
+        : 'The camera didn’t start. Use the photo button, or type the numbers.', { warn: true });
+    }
+    els.scanBtn.disabled = false;
+    els.video.srcObject = stream;
+    els.camera.hidden = false;
+    document.body.classList.add('camera-open');
+    els.video.play().catch(() => {});
+    els.shutter.focus();
+  }
+
+  function closeCamera() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    els.video.srcObject = null;
+    els.camera.hidden = true;
+    document.body.classList.remove('camera-open');
+    els.scanBtn.focus();
+  }
+
+  function capture() {
+    const w = els.video.videoWidth, h = els.video.videoHeight;
+    if (!w || !h) return; // camera still starting
+    const frame = document.createElement('canvas');
+    frame.width = w; frame.height = h;
+    frame.getContext('2d').drawImage(els.video, 0, 0, w, h);
+    closeCamera();
+    scan(frame);
+  }
+
+  els.scanBtn.addEventListener('click', openCamera);
+  els.shutter.addEventListener('click', capture);
+  els.camCancel.addEventListener('click', closeCamera);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stream) closeCamera(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && stream) closeCamera(); });
+
+  els.pickBtn.addEventListener('click', () => els.file.click());
+  els.file.addEventListener('change', () => {
+    const f = els.file.files && els.file.files[0];
+    els.file.value = '';
+    if (f) scan(f);
+  });
+  els.clear.addEventListener('click', () => {
+    els.cal.value = els.fat.value = '';
+    els.status.classList.remove('show');
+    setUnit('g');
+  });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', calc);
+
+  // Warm up the label reader in the background so the first scan is quick.
+  window.addEventListener('load', () => setTimeout(() => getWorker().catch(() => {}), 800));
+
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+
+  window.fatApp = { parseLabel, scan, lastTexts: [] };
+  calc();
+})();
+</script>
+</body>
+</html>
