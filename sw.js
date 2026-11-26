@@ -1,6 +1,6 @@
 ﻿// Keeps the app working with weak or no signal (e.g. inside a grocery store)
 // once it has been opened online at least once.
-const CACHE = 'fat-pct-v3';
+const CACHE = 'fat-pct-v4';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

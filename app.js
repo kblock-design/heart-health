@@ -337,8 +337,11 @@
 
   function applyResult(res, source) {
     const found = res.found || parseLabel('');
-    els.thumb.src = thumbOf(res.crop || source);
-    els.thumb.hidden = false;
+    const picture = res.crop || source;
+    els.thumb.hidden = !picture;
+    if (picture) els.thumb.src = thumbOf(picture);
+    $('rawWrap').hidden = !res.rawText;
+    $('rawText').textContent = res.rawText || '';
 
     if (found.calories !== null) els.cal.value = found.calories;
     if (found.fatCal !== null) { els.fat.value = found.fatCal; setUnit('cal'); }
@@ -509,6 +512,23 @@
     scan(frame);
   }
 
+  // ================= text handed over by an iPhone Shortcut =================
+  // The Shortcut takes the picture, lets the iPhone read the text, and opens this page
+  // with that text after "#text=" in the address. The part after # stays on the phone;
+  // it is never sent to the server.
+  function fromShortcut() {
+    const m = /[#&]text=([^&]*)/.exec(location.hash);
+    if (!m) return;
+    let text = m[1].replace(/\+/g, ' ');
+    try { text = decodeURIComponent(text); } catch (e) { /* use it as it came */ }
+    history.replaceState(null, '', location.pathname + location.search);
+    if (!text.trim()) {
+      return setStatus('The phone found no text in that picture. Run the shortcut again closer to the label, or type the numbers.', { warn: true });
+    }
+    applyResult({ found: parseLabel(text), labels: 1, crop: null, rawText: text }, null);
+  }
+  window.addEventListener('hashchange', fromShortcut);
+
   // ================= wiring =================
   els.cal.addEventListener('input', calc);
   els.fat.addEventListener('input', calc);
@@ -529,6 +549,7 @@
   els.clear.addEventListener('click', () => {
     els.cal.value = els.fat.value = '';
     els.status.classList.remove('show');
+    $('rawWrap').hidden = true;
     setUnit('g');
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', calc);
@@ -542,4 +563,5 @@
 
   window.fatApp = { parseLabel, scan, analyze, last: null };
   calc();
+  fromShortcut();
 })();

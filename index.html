@@ -121,6 +121,9 @@
   .busy .progress { display: block; }
   .progress i { display: block; height: 100%; width: 0; background: var(--on-shelf); transition: width .2s; }
 
+  .raw { margin-top: 14px; font-size: 15px; color: var(--on-shelf-soft); }
+  .raw summary { cursor: pointer; padding: 8px 0; font-weight: 800; }
+  .raw pre { margin: 0; padding: 10px; white-space: pre-wrap; font: inherit; font-size: 14px; border: 1px solid var(--on-shelf-soft); max-height: 40vh; overflow: auto; }
   .clear {
     display: block; margin: 14px 0 0 auto; padding: 10px 2px; font: inherit; font-size: 16px; font-weight: 800;
     background: none; border: 0; color: var(--on-shelf-soft); text-decoration: underline; text-underline-offset: 3px; cursor: pointer;
@@ -202,6 +205,11 @@
       <div class="progress"><i id="barFill"></i></div>
     </div>
   </div>
+
+  <details class="raw" id="rawWrap" hidden>
+    <summary>Text read from the label</summary>
+    <pre id="rawText"></pre>
+  </details>
 
   <button class="clear" type="button" id="clearBtn" hidden>Clear numbers</button>
 </main>
