@@ -8,7 +8,7 @@
     status: $('status'), statusText: $('statusText'), thumb: $('thumb'), bar: $('barFill'),
     scanBtn: $('scanBtn'), pickBtn: $('pickBtn'), file: $('fileInput'),
     camera: $('camera'), video: $('video'), shutter: $('shutter'), camCancel: $('camCancel'),
-    camHint: $('camHint'), camView: $('camView'), foundBox: $('foundBox'),
+    camHint: $('camHint'), camView: $('camView'), foundBox: $('foundBox'), camPick: $('camPick'),
     theme: $('themeColor'),
   };
   let fatUnit = 'g';
@@ -27,7 +27,7 @@
     els.pct.textContent = title;
     els.lede.textContent = lede;
     els.verdict.textContent = verdict;
-    els.theme.content = getComputedStyle(document.body).getPropertyValue('--page').trim();
+    if (!stream) els.theme.content = getComputedStyle(document.body).getPropertyValue('--page').trim();
   }
 
   function calc() {
@@ -471,7 +471,13 @@
     return cropScaled(canvas, 0, 0, canvas.width, canvas.height, s).toDataURL('image/jpeg', 0.7);
   }
 
+  // Marks a number the scan wasn't sure about. (Putting the cursor in the box instead
+  // would pop the keyboard up and shove the page around right after a scan.)
+  const flag = (el) => { el.classList.add('check'); };
+  const unflag = () => { els.cal.classList.remove('check'); els.fat.classList.remove('check'); };
+
   function applyResult(res, source) {
+    unflag();
     const found = res.found || parseLabel('');
     const picture = res.crop || source;
     els.thumb.hidden = !picture;
@@ -492,15 +498,15 @@
       }
       const missing = found.calories === null ? 'calories' : 'total fat';
       setStatus(`The ${missing} didn’t come through. Type it in, or scan again.`, { warn: true });
-      return (found.calories === null ? els.cal : els.fat).focus();
+      return flag(found.calories === null ? els.cal : els.fat);
     }
     if (found.fatCal === null && found.fatFromDV !== null) {
       setStatus(`Read ${found.calories} calories. The fat grams were unclear, so ${found.fatG} g is worked out from the ${found.fatFromDV}% daily value on the label. Check it.${several}`, { warn: true });
-      return els.fat.focus();
+      return flag(els.fat);
     }
     if (est !== null && Math.abs(est - found.calories) > Math.max(30, found.calories * 0.35)) {
       setStatus(`Read ${found.calories} calories, but the carbs, protein and fat on the label add up to about ${est}. Check the calories against the label.${several}`, { warn: true });
-      return els.cal.focus();
+      return flag(els.cal);
     }
     const fatTxt = found.fatCal !== null ? `${found.fatCal} calories from fat` : `${found.fatG} g of fat`;
     setStatus(`Read ${found.calories} calories and ${fatTxt}. Check them against the label.${several}`);
@@ -593,6 +599,7 @@
   }
 
   function applyProduct(p) {
+    unflag();
     els.cal.value = p.values.cal;
     els.fat.value = p.values.fat;
     els.thumb.hidden = true;
@@ -617,33 +624,48 @@
     return frame;
   }
 
-  // Draws the outline around the found label, matching how the video is fitted on screen.
+  // Moves the corner brackets onto the found label, matching how the video is fitted on
+  // screen. With no label they glide back to the middle. One missed frame is ignored so
+  // the brackets don't flicker back and forth.
+  let lost = 0;
   function showFound(rect, frame) {
-    if (!rect) { els.foundBox.hidden = true; return; }
-    const vw = els.camView.clientWidth, vh = els.camView.clientHeight;
+    const box = els.foundBox;
+    if (!rect) {
+      if (++lost < 2) return;
+      box.classList.remove('on');
+      box.style.left = box.style.top = box.style.width = box.style.height = '';
+      return;
+    }
+    lost = 0;
+    const vw = els.camView.clientWidth, vh = els.camView.clientHeight, pad = 8;
     const s = Math.max(vw / frame.width, vh / frame.height);
     const ox = (vw - frame.width * s) / 2, oy = (vh - frame.height * s) / 2;
-    Object.assign(els.foundBox.style, {
-      left: ox + rect.x * s + 'px', top: oy + rect.y * s + 'px',
-      width: rect.w * s + 'px', height: Math.min(rect.h * s, vh - (oy + rect.y * s) - 4) + 'px',
-    });
-    els.foundBox.hidden = false;
+    const clamp = (v, max) => Math.min(max - pad, Math.max(pad, v));
+    const x0 = clamp(ox + rect.x * s, vw), x1 = clamp(ox + (rect.x + rect.w) * s, vw);
+    const y0 = clamp(oy + rect.y * s, vh), y1 = clamp(oy + (rect.y + rect.h) * s, vh);
+    if (x1 - x0 < 60 || y1 - y0 < 60) return; // mostly off screen
+    Object.assign(box.style, { left: x0 + 'px', top: y0 + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' });
+    box.classList.add('on');
   }
+
+  const hint = (msg) => { if (els.camHint.textContent !== msg) els.camHint.textContent = msg; };
+  const pageColor = () => getComputedStyle(document.body).getPropertyValue('--page').trim();
 
   // Looks at the camera over and over. When it finds a label and the numbers hold up,
   // it closes the camera by itself and shows the result.
-  const POINT = 'Point the camera at the Nutrition Facts label or the barcode';
+  const POINT = 'Point at a Nutrition Facts label or a barcode';
   let barcodeNote = '';
+  let labelInView = false; // while a label is being read, the barcode stays out of the way
 
   // Watches for a barcode at the same time as the label; whichever works first wins.
   async function watchBarcode(my) {
     let det;
     try { det = await getDetector(); } catch (err) { return; }
     const tried = new Set();
-    const note = (msg) => { barcodeNote = msg; els.camHint.textContent = msg; setTimeout(() => { if (barcodeNote === msg) barcodeNote = ''; }, 6000); };
+    const note = (msg) => { barcodeNote = msg; hint(msg); setTimeout(() => { if (barcodeNote === msg) barcodeNote = ''; }, 6000); };
     while (my === session && stream) {
       await wait(400);
-      if (my !== session || !stream || !els.video.videoWidth) continue;
+      if (my !== session || !stream || !els.video.videoWidth || labelInView) continue;
       let codes = [];
       try { codes = await det.detect(els.video); } catch (err) { continue; }
       const code = codes.map((c) => c.rawValue).find((v) => isProductCode(v) && !tried.has(v));
@@ -652,18 +674,19 @@
       note('Barcode found. Looking it up…');
       let product;
       try { product = await lookup(code); }
-      catch (err) { note('The food database can’t be reached. Point at the Nutrition Facts label instead.'); continue; }
+      catch (err) { note('The food database can’t be reached. Try the label instead.'); continue; }
       if (my !== session || !stream) return;
+      if (labelInView) { tried.delete(code); continue; } // the label got there first
       if (product && product.values) { closeCamera(); return applyProduct(product); }
-      note(product ? 'That product is listed without calories and fat. Point at the Nutrition Facts label instead.'
-        : 'That barcode isn’t in the food database. Point at the Nutrition Facts label instead.');
+      note(product ? 'That product is listed without calories and fat. Try the label instead.'
+        : 'That barcode isn’t in the food database. Try the label instead.');
     }
   }
 
   async function watch(my) {
     let previous = null, misses = 0;
     const same = (a, b) => a && b && a.calories === b.calories && a.fatG === b.fatG && a.fatCal === b.fatCal;
-    if (!readerReady && !paddleFailed) els.camHint.textContent = FIRST_LOAD + ' A barcode can be scanned meanwhile.';
+    if (!readerReady && !paddleFailed) hint(FIRST_LOAD + ' A barcode can be scanned meanwhile.');
     while (my === session && stream) {
       const frame = grabFrame();
       if (!frame) { await wait(200); continue; }
@@ -678,8 +701,9 @@
       // cross-checks, or (when a check isn't possible) two frames in a row agree.
       const disputed = f && f.estimate !== null && !f.calChecked;
       if (f && complete(f) && f.fatFromDV === null && !disputed && (f.checked || same(f, previous))) {
-        els.camHint.textContent = 'Got it';
-        await wait(350); // let the outline around the label be seen
+        hint('Got it');
+        els.camera.classList.add('done');
+        await wait(450); // let the brackets around the label be seen
         if (my !== session || !stream) return;
         window.fatApp.last = res;
         closeCamera();
@@ -687,10 +711,12 @@
       }
       previous = f && complete(f) ? f : null;
       misses = res.rect ? misses + 1 : 0;
-      els.camHint.textContent = barcodeNote ? barcodeNote
+      labelInView = !!res.rect && misses <= 2; // a label that won't read lets the barcode back in
+      if (labelInView) barcodeNote = '';
+      hint(barcodeNote ? barcodeNote
         : !res.rect ? POINT
-        : misses > 2 ? 'Label found, but the numbers are blurry. Move closer or tap the button.'
-        : 'Label found. Hold still…';
+        : misses > 2 ? 'The numbers are blurry. Move closer, or tap the shutter.'
+        : 'Label found. Hold still…');
       await wait(250); // leave the phone a moment to redraw and respond to taps
     }
   }
@@ -716,13 +742,17 @@
     els.scanBtn.disabled = false;
     els.status.classList.remove('show');
     els.video.srcObject = stream;
-    els.camHint.textContent = POINT;
+    hint(POINT);
     barcodeNote = '';
-    els.foundBox.hidden = true;
+    labelInView = false;
+    lost = 2;
+    showFound(null);
+    els.camera.classList.remove('done');
     els.camera.hidden = false;
     document.body.classList.add('camera-open');
+    els.theme.content = '#000000';
     els.video.play().catch(() => {});
-    els.shutter.focus();
+    els.shutter.focus({ preventScroll: true });
     const my = ++session;
     watch(my);
     watchBarcode(my);
@@ -735,7 +765,8 @@
     els.video.srcObject = null;
     els.camera.hidden = true;
     document.body.classList.remove('camera-open');
-    els.scanBtn.focus();
+    els.theme.content = pageColor();
+    els.scanBtn.focus({ preventScroll: true });
   }
 
   function readNow() {
@@ -763,13 +794,14 @@
   window.addEventListener('hashchange', fromShortcut);
 
   // ================= wiring =================
-  els.cal.addEventListener('input', calc);
-  els.fat.addEventListener('input', calc);
+  els.cal.addEventListener('input', () => { els.cal.classList.remove('check'); calc(); });
+  els.fat.addEventListener('input', () => { els.fat.classList.remove('check'); calc(); });
   els.unitG.addEventListener('click', () => setUnit('g'));
   els.unitCal.addEventListener('click', () => setUnit('cal'));
   els.scanBtn.addEventListener('click', openCamera);
   els.shutter.addEventListener('click', readNow);
   els.camCancel.addEventListener('click', closeCamera);
+  els.camPick.addEventListener('click', () => { closeCamera(); els.file.click(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stream) closeCamera(); });
   document.addEventListener('visibilitychange', () => { if (document.hidden && stream) closeCamera(); });
 
@@ -781,6 +813,7 @@
   });
   els.clear.addEventListener('click', () => {
     els.cal.value = els.fat.value = '';
+    unflag();
     els.status.classList.remove('show');
     $('rawWrap').hidden = true;
     setUnit('g');
