@@ -40,7 +40,7 @@
     els.maxFat.textContent = (cal === null ? '0' : fmt(cal * LIMIT / 100 / 9)) + ' g';
 
     if (cal === null || fat === null) {
-      const missing = cal === null && fat === null ? 'Scan a label, or type its calories and total fat.'
+      const missing = cal === null && fat === null ? 'Scan a label or barcode, or type the calories and total fat.'
         : cal === null ? 'Add the calories to see the result.' : 'Add the total fat to see the result.';
       return show('', 'Fat Facts', missing, '');
     }
@@ -73,6 +73,7 @@
     const dvM = /(\d{1,3})\s*%/.exec(rest);
     const seg = (dvM ? rest.slice(0, dvM.index) : rest).trim();
     const cands = [];
+    const weak = []; // "8g" read as "80", "86"...: only believed if the daily value agrees
     const add = (s) => {
       const mm = /^([0-9OoIl|]+(?:[.,][0-9OoIl|]+)?)(.*)$/.exec(s.replace(/^[<~]/, ''));
       if (!mm || mm[2].length > 2) return;
@@ -82,8 +83,10 @@
       if (/^m/i.test(mm[2])) v /= 1000;
       if ((raw.split('.')[1] || '').length < 2) cands.push(v);          // labels never print 2 decimals
       if (!mm[2] && /\d9$/.test(raw)) cands.push(parseFloat(raw.slice(0, -1)));
+      else if (!mm[2] && /^\d{2,}$/.test(raw)) weak.push(parseFloat(raw.slice(0, -1)));
     };
     const toks = seg.split(/\s+/).filter(Boolean);
+    while (toks.length > 1 && toks[0].length <= 2 && !/\d|^[Oo]/.test(toks[0])) toks.shift(); // stray letter before the number
     if (toks.length) add(toks[0]);
     if (toks.length > 1 && /^[gq9]$/i.test(toks[1])) add(toks[0] + 'g');
     if (toks.length > 1 && dvM) add(toks.join(''));
@@ -94,10 +97,10 @@
       const bases = out.fatCal !== null ? [65, 78] : [78, 65];
       const err = (x) => Math.min(...bases.map((b) => Math.abs(x / b * 100 - want)));
       cands.sort((a, b) => err(a) - err(b));
-      if (cands.length) {
-        if (err(cands[0]) <= 1.6) out.fatChecked = true;
-        return cands[0];
-      }
+      if (cands.length && err(cands[0]) <= 1.6) { out.fatChecked = true; return cands[0]; }
+      const rescued = weak.find((w) => err(w) <= 1.6);
+      if (rescued !== undefined) { out.fatChecked = true; return rescued; }
+      if (cands.length) return cands[0];
       if (want <= 100) { out.fatFromDV = want; return labelRound(want * bases[0] / 100); }
       return null;
     }
@@ -140,8 +143,8 @@
 
     // Cross-checks using the label's own numbers.
     const grams = (re) => { const g = re.exec(t); return g ? parseFloat(g[1]) : null; };
-    const carb = grams(/total\s*carb[a-z.]*\s*(\d{1,3}(?:\.\d)?)\s*g\b/i);
-    const protein = grams(/protein\s*(\d{1,3}(?:\.\d)?)\s*g\b/i);
+    const carb = grams(/carb[a-z. ]{0,18}?(\d{1,3}(?:\.\d)?)\s*g\b/i);
+    const protein = grams(/protein[a-z ]{0,4}?(\d{1,3}(?:\.\d)?)\s*g\b/i);
     if (carb !== null && protein !== null && out.fatG !== null) {
       const est = out.estimate = Math.round(carb * 4 + protein * 4 + out.fatG * 9); // 4, 4 and 9 calories per gram
       const near = (c) => Math.abs(est - c) <= Math.max(20, c * 0.2);
@@ -172,19 +175,152 @@
     return best;
   }
 
-  // ================= finding the label in a picture =================
+  // ================= the label reader: PaddleOCR, running on the phone =================
+  // A text reader built for photos. It returns each piece of text with its position,
+  // so the label's rows can be rebuilt from where things sit rather than guessed.
+  const PADDLE = 'https://cdn.jsdelivr.net/npm/@paddleocr/paddleocr-js@0.4.2/+esm';
+  const ORT_DIST = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/';
+  let paddlePromise = null;
+  let paddleFailed = false;
+  let readerReady = false;
+
+  function getPaddle() {
+    if (!paddlePromise) {
+      paddlePromise = (async () => {
+        const { PaddleOCR } = await import(PADDLE);
+        const models = new URL('models/', document.baseURI).href;
+        const ocr = await PaddleOCR.create({
+          textDetectionModelName: 'PP-OCRv5_mobile_det',
+          textDetectionModelAsset: { url: models + 'PP-OCRv5_mobile_det_onnx_infer.tar' },
+          textRecognitionModelName: 'en_PP-OCRv5_mobile_rec',
+          textRecognitionModelAsset: { url: models + 'en_PP-OCRv5_mobile_rec_onnx_infer.tar' },
+          ortOptions: { backend: 'wasm', wasmPaths: ORT_DIST },
+        });
+        readerReady = true;
+        try { localStorage.setItem('readerReady', '1'); } catch (e) { /* private mode */ }
+        return ocr;
+      })();
+      paddlePromise.catch((err) => { paddleFailed = true; console.warn('PaddleOCR unavailable, using the backup reader', err); });
+    }
+    return paddlePromise;
+  }
+
+  const median = (list) => { const s = list.slice().sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : 0; };
+
+  // Turns the reader's pieces of text into the rows of one label, as plain text.
+  function readPanel(items, k, W, H) {
+    const boxes = items.filter((i) => i.text && i.text.trim() && i.poly && i.poly.length >= 4).map((i) => {
+      const p = i.poly.map(([x, y]) => [x / k, y / k]);
+      const xs = p.map((q) => q[0]), ys = p.map((q) => q[1]);
+      return {
+        text: i.text.trim(),
+        x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys),
+        cx: (xs[0] + xs[1] + xs[2] + xs[3]) / 4, cy: (ys[0] + ys[1] + ys[2] + ys[3]) / 4,
+        w: Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]), h: Math.hypot(p[3][0] - p[0][0], p[3][1] - p[0][1]),
+        angle: Math.atan2(p[1][1] - p[0][1], p[1][0] - p[0][0]),
+      };
+    });
+    const out = { text: '', rect: null, labels: 0 };
+    if (!boxes.length) return out;
+    const typical = median(boxes.map((b) => b.h));
+
+    // Headings: "Nutrition Facts" in type clearly bigger than the body text.
+    const heads = boxes.filter((b) => /nutrit/i.test(b.text) && b.text.replace(/[^a-z]/gi, '').length <= 18 && b.h >= typical * 1.3);
+    out.labels = heads.length;
+    const dist = (b) => Math.hypot(b.cx - W / 2, b.cy - H / 2);
+    const hd = heads.sort((a, b) => dist(a) - dist(b))[0] || null;
+
+    // Work in the label's own upright frame, so a tilted label still lines up in rows.
+    const wide = boxes.filter((b) => b.w > b.h * 3);
+    const tilt = hd ? hd.angle : median((wide.length ? wide : boxes).map((b) => b.angle));
+    const a = Math.abs(tilt) < 0.6 ? tilt : 0;
+    const px = hd ? hd.cx : W / 2, py = hd ? hd.cy : H / 2;
+    for (const b of boxes) {
+      const dx = b.cx - px, dy = b.cy - py;
+      b.rx = dx * Math.cos(a) + dy * Math.sin(a);
+      b.ry = -dx * Math.sin(a) + dy * Math.cos(a);
+      b.rx0 = b.rx - b.w / 2; b.rx1 = b.rx + b.w / 2;
+    }
+
+    let panel = boxes;
+    if (hd) {
+      let hw = hd.w;
+      if (!/fact/i.test(hd.text)) { // "Facts" came out as its own piece, or was missed
+        const facts = boxes.find((b) => b !== hd && /^facts?\W*$/i.test(b.text) && b.rx0 > hd.rx && Math.abs(b.ry) < hd.h * 0.6);
+        hw = facts ? facts.rx1 - hd.rx0 : hd.w * 1.62;
+      }
+      const left0 = hd.rx0, right0 = hd.rx0 + hw;
+      let left = left0 - hw * 0.3, right = right0 + hw * 0.9;
+      for (const o of heads) { // don't run into a neighbouring label
+        if (o === hd || Math.abs(o.ry) > hw) continue;
+        if (o.rx0 > right0) right = Math.min(right, o.rx0 - hw * 0.05);
+        if (o.rx1 < left0) left = Math.max(left, o.rx1 + hw * 0.02);
+      }
+      const inBand = (b) => b.ry > -hd.h * 0.8 && b.ry < hw * 3.2 && b.rx0 >= left && b.rx0 <= right;
+      // The "% Daily Value" column sits flush against the label's right edge.
+      const pcts = boxes.filter((b) => inBand(b) && /^\d{1,3}\s?%$/.test(b.text)).map((b) => b.rx1);
+      right = Math.min(right, pcts.length >= 2 ? Math.max(...pcts) + hw * 0.05 : right0 + hw * 0.35);
+      panel = boxes.filter(inBand);
+    }
+
+    // Each row: a piece that names a nutrient, plus everything else sitting at the same height
+    // ("Total" + "Fat 8g" + "10%" come back as separate pieces as often as one).
+    const anchors = panel.filter((b) => /calor|fat|carb|protein|kcal/i.test(b.text)).sort((m, n) => m.ry - n.ry || m.rx0 - n.rx0);
+    const overlaps = (m, n) => Math.min(m.ry + m.h / 2, n.ry + n.h / 2) - Math.max(m.ry - m.h / 2, n.ry - n.h / 2) >= Math.min(m.h, n.h) * 0.5;
+    const rows = anchors.map((m) => panel.filter((n) => n === m || overlaps(m, n)).sort((p, q) => p.rx0 - q.rx0).map((b) => b.text).join(' '));
+    out.text = rows.filter((row, i) => rows.indexOf(row) === i).join('\n');
+
+    if (hd && anchors.length) {
+      const bottom = anchors[anchors.length - 1].ry + typical * 2;
+      const part = panel.filter((b) => b.ry <= bottom);
+      const x0 = Math.max(0, Math.min(...part.map((b) => b.x0)) - typical), y0 = Math.max(0, Math.min(...part.map((b) => b.y0)) - typical);
+      const x1 = Math.min(W, Math.max(...part.map((b) => b.x1)) + typical), y1 = Math.min(H, Math.max(...part.map((b) => b.y1)) + typical);
+      out.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    }
+    return out;
+  }
+
+  async function analyzePaddle(src, { live = false } = {}) {
+    const ocr = await getPaddle();
+    const W = src.width, H = src.height, long = Math.max(W, H);
+    const k = Math.min(live ? 1280 : 1600, Math.max(1100, long)) / long;
+    const [page] = await ocr.predict(cropScaled(src, 0, 0, W, H, k));
+    const panel = readPanel(page.items || [], k, W, H);
+    const r = panel.rect;
+    return {
+      found: parseLabel(panel.text), rect: r, labels: panel.labels, texts: [panel.text],
+      crop: r ? cropScaled(src, r.x, r.y, r.w, r.h, Math.min(1, 600 / Math.max(r.w, r.h))) : null,
+    };
+  }
+
+  // Reads one picture. Uses PaddleOCR; if that can't run on this phone, the older reader.
+  async function analyze(src, opts) {
+    if (!paddleFailed) {
+      try { return await analyzePaddle(src, opts); }
+      catch (err) { paddleFailed = true; console.warn('PaddleOCR failed, using the backup reader', err); }
+    }
+    return analyzeTess(src, opts);
+  }
+
+  // ================= backup reader: Tesseract =================
   let workerPromise = null;
+  let tessScript = null;
   function getWorker() {
-    if (!window.Tesseract) return Promise.reject(new Error('The label reader didn’t load. Connect to the internet and reload, or type the numbers.'));
     if (!workerPromise) {
-      workerPromise = Tesseract.createWorker('eng', 1, {
+      tessScript = tessScript || new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('The label reader didn’t load. Connect to the internet and reload, or type the numbers.'));
+        document.head.append(s);
+      });
+      workerPromise = tessScript.then(() => Tesseract.createWorker('eng', 1, {
         logger: (m) => {
           if (!els.status.classList.contains('busy')) return;
           if (m.status === 'recognizing text') setStatus('Reading the label…', { busy: true, progress: m.progress });
-          else if (/load/.test(m.status)) setStatus('Setting up the label reader. This happens once.', { busy: true, progress: m.progress || 0 });
         },
-      });
-      workerPromise.catch(() => { workerPromise = null; });
+      }));
+      workerPromise.catch(() => { workerPromise = null; tessScript = null; });
     }
     return workerPromise;
   }
@@ -273,7 +409,7 @@
 
   // Finds the label in the picture, crops to it and reads the numbers.
   // live = true is the quick version the camera runs over and over.
-  async function analyze(src, { live = false } = {}) {
+  async function analyzeTess(src, { live = false } = {}) {
     const W = src.width, H = src.height, long = Math.max(W, H);
     const texts = [];
     const result = { found: null, rect: null, labels: 0, crop: null, texts };
@@ -387,11 +523,16 @@
   async function scan(source) {
     els.scanBtn.disabled = els.pickBtn.disabled = true;
     els.thumb.hidden = true;
-    setStatus('Looking for the label…', { busy: true, progress: 0 });
+    setStatus(readerReady || paddleFailed ? 'Reading the label…' : FIRST_LOAD, { busy: true, progress: 0 });
     try {
       const canvas = source instanceof HTMLCanvasElement ? source : await fileToCanvas(source);
       const res = await exclusive(() => analyze(canvas));
       window.fatApp.last = res;
+      if (!res.found || !complete(res.found)) {
+        // No readable label in the picture: maybe it shows the barcode instead.
+        const product = await barcodeIn(canvas).catch(() => null);
+        if (product && product.values) { applyProduct(product); return res.found; }
+      }
       applyResult(res, canvas);
       return res.found;
     } catch (err) {
@@ -399,6 +540,65 @@
     } finally {
       els.scanBtn.disabled = els.pickBtn.disabled = false;
     }
+  }
+
+  // ================= barcode: look the product up instead of reading the label =================
+  // The barcode number is sent to Open Food Facts, a free public food database.
+  // Only that number leaves the phone; no picture does.
+  const FIRST_LOAD = 'Getting the label reader ready. This happens once and is about 20 MB.';
+  let detectorPromise = null;
+  function getDetector() {
+    if (!detectorPromise) {
+      detectorPromise = import('https://cdn.jsdelivr.net/npm/barcode-detector@3/dist/es/ponyfill.min.js')
+        .then((m) => new m.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e'] }));
+      detectorPromise.catch(() => { detectorPromise = null; });
+    }
+    return detectorPromise;
+  }
+
+  const lookups = new Map();
+  function lookup(code) {
+    if (!lookups.has(code)) {
+      const p = fetchProduct(code);
+      lookups.set(code, p);
+      p.catch(() => lookups.delete(code));
+    }
+    return lookups.get(code);
+  }
+
+  async function fetchProduct(code) {
+    const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,brands,nutriments`);
+    if (!r.ok && r.status !== 404) throw new Error('lookup failed');
+    const j = await r.json();
+    if (j.status !== 1 || !j.product) return null;
+    const n = j.product.nutriments || {};
+    const pick = (suffix, per) => {
+      const cal = num(n['energy-kcal' + suffix]), fat = num(n['fat' + suffix]);
+      return cal !== null && fat !== null ? { cal: Math.round(cal * 10) / 10, fat: Math.round(fat * 10) / 10, per } : null;
+    };
+    const brand = String(j.product.brands || '').split(',')[0].trim();
+    const name = String(j.product.product_name || '').trim();
+    return {
+      code,
+      name: (brand && !name.toLowerCase().includes(brand.toLowerCase()) ? brand + ' ' : '') + (name || 'This product'),
+      values: pick('_serving', 'serving') || pick('_100g', '100 g'),
+    };
+  }
+
+  const isProductCode = (v) => /^\d{8,14}$/.test(v);
+  async function barcodeIn(source) {
+    const det = await getDetector();
+    const codes = (await det.detect(source)).map((c) => c.rawValue).filter(isProductCode);
+    return codes.length ? lookup(codes[0]) : null;
+  }
+
+  function applyProduct(p) {
+    els.cal.value = p.values.cal;
+    els.fat.value = p.values.fat;
+    els.thumb.hidden = true;
+    $('rawWrap').hidden = true;
+    setUnit('g');
+    setStatus(`${p.name}, found by its barcode: ${p.values.cal} calories and ${p.values.fat} g of fat per ${p.values.per}. This comes from Open Food Facts, a public database, so check it against the label.`);
   }
 
   // ================= in-app camera =================
@@ -432,9 +632,38 @@
 
   // Looks at the camera over and over. When it finds a label and the numbers hold up,
   // it closes the camera by itself and shows the result.
+  const POINT = 'Point the camera at the Nutrition Facts label or the barcode';
+  let barcodeNote = '';
+
+  // Watches for a barcode at the same time as the label; whichever works first wins.
+  async function watchBarcode(my) {
+    let det;
+    try { det = await getDetector(); } catch (err) { return; }
+    const tried = new Set();
+    const note = (msg) => { barcodeNote = msg; els.camHint.textContent = msg; setTimeout(() => { if (barcodeNote === msg) barcodeNote = ''; }, 6000); };
+    while (my === session && stream) {
+      await wait(400);
+      if (my !== session || !stream || !els.video.videoWidth) continue;
+      let codes = [];
+      try { codes = await det.detect(els.video); } catch (err) { continue; }
+      const code = codes.map((c) => c.rawValue).find((v) => isProductCode(v) && !tried.has(v));
+      if (!code) continue;
+      tried.add(code);
+      note('Barcode found. Looking it up…');
+      let product;
+      try { product = await lookup(code); }
+      catch (err) { note('The food database can’t be reached. Point at the Nutrition Facts label instead.'); continue; }
+      if (my !== session || !stream) return;
+      if (product && product.values) { closeCamera(); return applyProduct(product); }
+      note(product ? 'That product is listed without calories and fat. Point at the Nutrition Facts label instead.'
+        : 'That barcode isn’t in the food database. Point at the Nutrition Facts label instead.');
+    }
+  }
+
   async function watch(my) {
     let previous = null, misses = 0;
     const same = (a, b) => a && b && a.calories === b.calories && a.fatG === b.fatG && a.fatCal === b.fatCal;
+    if (!readerReady && !paddleFailed) els.camHint.textContent = FIRST_LOAD + ' A barcode can be scanned meanwhile.';
     while (my === session && stream) {
       const frame = grabFrame();
       if (!frame) { await wait(200); continue; }
@@ -458,10 +687,11 @@
       }
       previous = f && complete(f) ? f : null;
       misses = res.rect ? misses + 1 : 0;
-      els.camHint.textContent = !res.rect ? 'Point the camera at a Nutrition Facts label'
-        : misses > 3 ? 'Label found, but the numbers are blurry. Move closer or tap the button.'
+      els.camHint.textContent = barcodeNote ? barcodeNote
+        : !res.rect ? POINT
+        : misses > 2 ? 'Label found, but the numbers are blurry. Move closer or tap the button.'
         : 'Label found. Hold still…';
-      await wait(120);
+      await wait(250); // leave the phone a moment to redraw and respond to taps
     }
   }
 
@@ -486,13 +716,16 @@
     els.scanBtn.disabled = false;
     els.status.classList.remove('show');
     els.video.srcObject = stream;
-    els.camHint.textContent = 'Point the camera at a Nutrition Facts label';
+    els.camHint.textContent = POINT;
+    barcodeNote = '';
     els.foundBox.hidden = true;
     els.camera.hidden = false;
     document.body.classList.add('camera-open');
     els.video.play().catch(() => {});
     els.shutter.focus();
-    watch(++session);
+    const my = ++session;
+    watch(my);
+    watchBarcode(my);
   }
 
   function closeCamera() {
@@ -554,14 +787,17 @@
   });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', calc);
 
-  // Warm up the label reader in the background so the first scan is quick.
-  window.addEventListener('load', () => setTimeout(() => getWorker().catch(() => {}), 800));
+  // On a return visit the reader is already saved on the phone, so warm it up right away.
+  // On a first visit, wait until a scan is asked for before downloading 20 MB.
+  let warm = false;
+  try { warm = localStorage.getItem('readerReady') === '1'; } catch (e) { /* private mode */ }
+  if (warm) window.addEventListener('load', () => setTimeout(() => getPaddle().catch(() => {}), 600));
 
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
-  window.fatApp = { parseLabel, scan, analyze, last: null };
+  window.fatApp = { parseLabel, scan, analyze, analyzeTess, lookup, barcodeIn, last: null };
   calc();
   fromShortcut();
 })();

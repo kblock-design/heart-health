@@ -1,6 +1,6 @@
 ﻿// Keeps the app working with weak or no signal (e.g. inside a grocery store)
 // once it has been opened online at least once.
-const CACHE = 'fat-pct-v4';
+const CACHE = 'fat-pct-v5';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -22,7 +22,7 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const sameOrigin = new URL(req.url).origin === self.location.origin;
 
-  if (sameOrigin) {
+  if (sameOrigin && !req.url.includes('/models/')) {
     // App files: newest version when online, saved copy when offline.
     e.respondWith(
       fetch(req)
@@ -33,7 +33,7 @@ self.addEventListener('fetch', (e) => {
         .catch(() => caches.match(req, { ignoreSearch: true }))
     );
   } else {
-    // Text-reader files from the CDN are versioned and large: saved copy first.
+    // Reader files (the models here, the rest from the CDN) are large and never change: saved copy first.
     e.respondWith(
       caches.match(req).then((hit) => hit || fetch(req).then((res) => {
         if (cacheable(res)) caches.open(CACHE).then((c) => c.put(req, res.clone()));
