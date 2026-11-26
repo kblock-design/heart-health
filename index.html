@@ -137,24 +137,26 @@
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
     touch-action: none; overscroll-behavior: contain; -webkit-user-select: none; user-select: none;
   }
-  .camera .view, .camera video { position: absolute; inset: 0; width: 100%; height: 100%; }
-  .camera video { object-fit: cover; }
-  .camera .view::after { /* soft shade so the controls stay readable over a bright picture */
-    content: ""; position: absolute; inset: 0; pointer-events: none;
-    background: linear-gradient(rgba(0, 0, 0, .45), transparent 16%, transparent 60%, rgba(0, 0, 0, .6));
-  }
+  .camera .view, .camera video, .camera .still { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .camera video, .camera .still { object-fit: cover; }
+  /* Out of sight until the feed has settled (see reveal() in app.js), then faded in. */
+  .camera video { opacity: 0; transition: opacity .25s; }
+  .camera.live video { opacity: 1; }
+  /* The picture held on screen once the camera has done its job. */
+  .camera .still { display: none; }
+  .camera.frozen .still { display: block; }
 
-  /* Corner brackets: where to aim at first, then they move onto the label once it is found. */
+  /* The frame to fit the label in. Only what is inside it is read, so it never moves;
+     its corners turn yellow when a label is seen and green when the numbers are in. */
+  .camera .shade, .camera .reticle { position: absolute; left: 7%; top: 14%; width: 86%; height: 56%; border-radius: 24px; pointer-events: none; }
+  .camera .shade { box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .38); }
   .camera .reticle {
-    --c: 34px;
-    position: absolute; left: 11%; top: 19%; width: 78%; height: 44%;
-    border: 3px solid rgba(255, 255, 255, .92); border-radius: 22px; pointer-events: none;
+    --c: 38px;
+    border: 3.5px solid rgba(255, 255, 255, .95); transition: border-color .2s;
     -webkit-mask: linear-gradient(#000 0 0) 0 0 / var(--c) var(--c) no-repeat, linear-gradient(#000 0 0) 100% 0 / var(--c) var(--c) no-repeat,
       linear-gradient(#000 0 0) 0 100% / var(--c) var(--c) no-repeat, linear-gradient(#000 0 0) 100% 100% / var(--c) var(--c) no-repeat;
     mask: linear-gradient(#000 0 0) 0 0 / var(--c) var(--c) no-repeat, linear-gradient(#000 0 0) 100% 0 / var(--c) var(--c) no-repeat,
       linear-gradient(#000 0 0) 0 100% / var(--c) var(--c) no-repeat, linear-gradient(#000 0 0) 100% 100% / var(--c) var(--c) no-repeat;
-    transition: left .35s cubic-bezier(.3, .7, .2, 1), top .35s cubic-bezier(.3, .7, .2, 1),
-      width .35s cubic-bezier(.3, .7, .2, 1), height .35s cubic-bezier(.3, .7, .2, 1), border-color .2s;
   }
   .camera .reticle.on { border-color: #ffd60a; }
   .camera.done .reticle { border-color: #30d158; }
@@ -181,6 +183,8 @@
   .camera .shutter { width: 76px; height: 76px; padding: 3px; border-radius: 50%; background: none; border: 4px solid #fff; }
   .camera .shutter::before { content: ""; display: block; width: 100%; height: 100%; border-radius: 50%; background: #fff; transition: transform .12s; }
   .camera .shutter:active::before { transform: scale(.88); }
+  .camera.busy .shutter::before { animation: reading 1s ease-in-out infinite alternate; }
+  @keyframes reading { from { transform: scale(.82); opacity: .9; } to { transform: scale(.5); opacity: .45; } }
   .camera :focus-visible { outline-color: #8fb4ff; outline-offset: 4px; }
   html:has(body.camera-open), body.camera-open { overflow: hidden; overscroll-behavior: none; }
 
@@ -251,13 +255,15 @@
 <div class="camera" id="camera" role="dialog" aria-modal="true" aria-label="Scan a label" hidden>
   <div class="view" id="camView">
     <video id="video" playsinline muted autoplay></video>
+    <canvas class="still" id="still"></canvas>
+    <div class="shade"></div>
     <div class="reticle" id="foundBox"></div>
   </div>
   <button class="round glass close" id="camCancel" type="button" aria-label="Close the camera">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
   </button>
   <div class="bottom">
-    <p class="hint glass" id="camHint" aria-live="polite">Point at a Nutrition Facts label or a barcode</p>
+    <p class="hint glass" id="camHint" aria-live="polite">Fit the Nutrition Facts label in the frame, or show a barcode</p>
     <div class="bar">
       <button class="round glass" id="camPick" type="button" aria-label="Choose a photo instead">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="3.5"/><circle cx="8.6" cy="9.8" r="1.4"/><path d="m4 17 4.6-4.4 3.6 3.4 3-2.8L20 17.6"/></svg>

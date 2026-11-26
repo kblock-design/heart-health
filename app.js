@@ -8,7 +8,7 @@
     status: $('status'), statusText: $('statusText'), thumb: $('thumb'), bar: $('barFill'),
     scanBtn: $('scanBtn'), pickBtn: $('pickBtn'), file: $('fileInput'),
     camera: $('camera'), video: $('video'), shutter: $('shutter'), camCancel: $('camCancel'),
-    camHint: $('camHint'), camView: $('camView'), foundBox: $('foundBox'), camPick: $('camPick'),
+    camHint: $('camHint'), camView: $('camView'), foundBox: $('foundBox'), camPick: $('camPick'), still: $('still'),
     theme: $('themeColor'),
   };
   let fatUnit = 'g';
@@ -27,7 +27,7 @@
     els.pct.textContent = title;
     els.lede.textContent = lede;
     els.verdict.textContent = verdict;
-    if (!stream) els.theme.content = getComputedStyle(document.body).getPropertyValue('--page').trim();
+    if (els.camera.hidden) els.theme.content = getComputedStyle(document.body).getPropertyValue('--page').trim();
   }
 
   function calc() {
@@ -164,6 +164,11 @@
 
   const hasFat = (f) => f.fatG !== null || f.fatCal !== null;
   const complete = (f) => f.calories !== null && hasFat(f);
+  // Fat can't supply more calories than the food has (a little slack for label rounding).
+  const plausible = (f) => {
+    const fatCal = f.fatCal !== null ? f.fatCal : f.fatG * 9;
+    return f.calories > 0 ? fatCal <= f.calories * 1.15 : fatCal === 0;
+  };
   const score = (f) => (complete(f) ? (f.checked ? 3 : 2) : (f.calories !== null || hasFat(f) ? 1 : 0));
   function merge(best, p) {
     if (!best) return p;
@@ -184,18 +189,52 @@
   let paddleFailed = false;
   let readerReady = false;
 
+  // The reader runs in a background worker when the phone allows it, so the camera
+  // picture and the buttons stay responsive while a picture is being read. If the
+  // worker can't start or stops answering, the reader is rebuilt on the page itself.
+  let useWorker = typeof Worker === 'function';
+  let inWorker = false;
+
+  function createReader(PaddleOCR, worker) {
+    const models = new URL('models/', document.baseURI).href;
+    return PaddleOCR.create({
+      worker,
+      textDetectionModelName: 'PP-OCRv5_mobile_det',
+      textDetectionModelAsset: { url: models + 'PP-OCRv5_mobile_det_onnx_infer.tar' },
+      textRecognitionModelName: 'en_PP-OCRv5_mobile_rec',
+      textRecognitionModelAsset: { url: models + 'en_PP-OCRv5_mobile_rec_onnx_infer.tar' },
+      ortOptions: { backend: 'wasm', wasmPaths: ORT_DIST },
+    });
+  }
+
+  // A worker's script has to come from this site, and the reader's lives on the CDN.
+  // So while the reader starts, its worker is given a one-line local script that
+  // imports the real one.
+  async function createInWorker(PaddleOCR) {
+    const Real = window.Worker;
+    let fail;
+    const broke = new Promise((_, reject) => { fail = reject; });
+    window.Worker = function (url, opts) {
+      const u = new URL(String(url), location.href);
+      const w = u.origin === location.origin ? new Real(url, opts)
+        : new Real(URL.createObjectURL(new Blob([`import ${JSON.stringify(u.href)};`], { type: 'text/javascript' })), { ...opts, type: 'module' });
+      w.addEventListener('error', (e) => fail(new Error('worker: ' + (e.message || 'did not start'))));
+      return w;
+    };
+    try { return await Promise.race([createReader(PaddleOCR, true), broke]); }
+    finally { window.Worker = Real; }
+  }
+
   function getPaddle() {
     if (!paddlePromise) {
       paddlePromise = (async () => {
         const { PaddleOCR } = await import(PADDLE);
-        const models = new URL('models/', document.baseURI).href;
-        const ocr = await PaddleOCR.create({
-          textDetectionModelName: 'PP-OCRv5_mobile_det',
-          textDetectionModelAsset: { url: models + 'PP-OCRv5_mobile_det_onnx_infer.tar' },
-          textRecognitionModelName: 'en_PP-OCRv5_mobile_rec',
-          textRecognitionModelAsset: { url: models + 'en_PP-OCRv5_mobile_rec_onnx_infer.tar' },
-          ortOptions: { backend: 'wasm', wasmPaths: ORT_DIST },
-        });
+        let ocr = null;
+        if (useWorker) {
+          try { ocr = await createInWorker(PaddleOCR); inWorker = true; }
+          catch (err) { useWorker = false; console.warn('The reader can’t run in the background here', err); }
+        }
+        if (!ocr) { ocr = await createReader(PaddleOCR, false); inWorker = false; }
         readerReady = true;
         try { localStorage.setItem('readerReady', '1'); } catch (e) { /* private mode */ }
         return ocr;
@@ -283,8 +322,14 @@
   async function analyzePaddle(src, { live = false } = {}) {
     const ocr = await getPaddle();
     const W = src.width, H = src.height, long = Math.max(W, H);
-    const k = Math.min(live ? 1280 : 1600, Math.max(1100, long)) / long;
-    const [page] = await ocr.predict(cropScaled(src, 0, 0, W, H, k));
+    const k = Math.min(live ? 1024 : 1600, Math.max(live ? 960 : 1100, long)) / long;
+    let job = ocr.predict(cropScaled(src, 0, 0, W, H, k));
+    if (inWorker) { // a worker that has stopped answering must not leave the scan hanging
+      let timer;
+      job = Promise.race([job, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('worker: no answer')), 25000); })])
+        .finally(() => clearTimeout(timer));
+    }
+    const [page] = await job;
     const panel = readPanel(page.items || [], k, W, H);
     const r = panel.rect;
     return {
@@ -297,7 +342,16 @@
   async function analyze(src, opts) {
     if (!paddleFailed) {
       try { return await analyzePaddle(src, opts); }
-      catch (err) { paddleFailed = true; console.warn('PaddleOCR failed, using the backup reader', err); }
+      catch (err) {
+        if (!inWorker) { paddleFailed = true; console.warn('PaddleOCR failed, using the backup reader', err); }
+        else {
+          // The background worker let us down: start the reader again on the page itself.
+          console.warn('The background reader failed, restarting it on the page', err);
+          useWorker = inWorker = false; paddlePromise = null;
+          try { return await analyzePaddle(src, opts); }
+          catch (err2) { paddleFailed = true; console.warn('PaddleOCR failed, using the backup reader', err2); }
+        }
+      }
     }
     return analyzeTess(src, opts);
   }
@@ -509,6 +563,11 @@
       return flag(els.cal);
     }
     const fatTxt = found.fatCal !== null ? `${found.fatCal} calories from fat` : `${found.fatG} g of fat`;
+    if (!plausible(found)) {
+      setStatus(`Read ${found.calories} calories and ${fatTxt}, which can’t both be right. Scan again, or correct them from the label.`, { warn: true });
+      flag(els.cal);
+      return flag(els.fat);
+    }
     setStatus(`Read ${found.calories} calories and ${fatTxt}. Check them against the label.${several}`);
   }
 
@@ -525,23 +584,24 @@
     }
   }
 
-  // Full read of one picture (a chosen photo, or the camera's "read it now" button).
-  async function scan(source) {
+  // Full read of one picture (a chosen photo, or the camera's shutter button).
+  // "ready" is asked just before the result is shown; answering false drops the result.
+  async function scan(source, ready = () => true) {
     els.scanBtn.disabled = els.pickBtn.disabled = true;
     els.thumb.hidden = true;
     setStatus(readerReady || paddleFailed ? 'Reading the label…' : FIRST_LOAD, { busy: true, progress: 0 });
     try {
       const canvas = source instanceof HTMLCanvasElement ? source : await fileToCanvas(source);
       const res = await exclusive(() => analyze(canvas));
+      // No readable label in the picture: maybe it shows the barcode instead.
+      const product = res.found && complete(res.found) ? null : await barcodeIn(canvas).catch(() => null);
+      if (!ready()) return els.status.classList.remove('show');
       window.fatApp.last = res;
-      if (!res.found || !complete(res.found)) {
-        // No readable label in the picture: maybe it shows the barcode instead.
-        const product = await barcodeIn(canvas).catch(() => null);
-        if (product && product.values) { applyProduct(product); return res.found; }
-      }
-      applyResult(res, canvas);
+      if (product && product.values) applyProduct(product);
+      else applyResult(res, canvas);
       return res.found;
     } catch (err) {
+      if (!ready()) return els.status.classList.remove('show');
       setStatus(err && err.message ? err.message : 'That picture couldn’t be read. Scan again, or type the numbers.', { warn: true });
     } finally {
       els.scanBtn.disabled = els.pickBtn.disabled = false;
@@ -615,37 +675,54 @@
   let session = 0;
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  function grabFrame() {
+  // The part of the camera picture inside the on-screen frame (plus a margin, as a share
+  // of the frame's size). Only this part is read: the label fills more of the picture, so
+  // its small print is easier to read, and whatever is around it is left out.
+  function grabFrame(margin = 0.06) {
     const w = els.video.videoWidth, h = els.video.videoHeight;
     if (!w || !h) return null; // camera still starting
+    const v = els.camView.getBoundingClientRect(), g = els.foundBox.getBoundingClientRect();
+    if (!v.width || !g.width) return null;
+    const s = Math.max(v.width / w, v.height / h); // the video is fitted to cover the screen
+    const ox = v.left + (v.width - w * s) / 2, oy = v.top + (v.height - h * s) / 2;
+    const mx = g.width * margin, my = g.height * margin;
+    const x0 = Math.max(0, Math.round((g.left - mx - ox) / s)), x1 = Math.min(w, Math.round((g.right + mx - ox) / s));
+    const y0 = Math.max(0, Math.round((g.top - my - oy) / s)), y1 = Math.min(h, Math.round((g.bottom + my - oy) / s));
+    if (x1 - x0 < 50 || y1 - y0 < 50) return null;
     const frame = document.createElement('canvas');
-    frame.width = w; frame.height = h;
-    frame.getContext('2d').drawImage(els.video, 0, 0, w, h);
+    frame.width = x1 - x0; frame.height = y1 - y0;
+    frame.getContext('2d').drawImage(els.video, x0, y0, frame.width, frame.height, 0, 0, frame.width, frame.height);
     return frame;
   }
 
-  // Moves the corner brackets onto the found label, matching how the video is fitted on
-  // screen. With no label they glide back to the middle. One missed frame is ignored so
-  // the brackets don't flicker back and forth.
-  let lost = 0;
-  function showFound(rect, frame) {
-    const box = els.foundBox;
-    if (!rect) {
-      if (++lost < 2) return;
-      box.classList.remove('on');
-      box.style.left = box.style.top = box.style.width = box.style.height = '';
-      return;
+  // Holds the current camera picture on screen as a still, so that turning the camera
+  // off doesn't leave a black screen while the result is on its way.
+  function freeze() {
+    const w = els.video.videoWidth, h = els.video.videoHeight;
+    if (!w || !h) return;
+    els.still.width = w; els.still.height = h;
+    els.still.getContext('2d').drawImage(els.video, 0, 0, w, h);
+    els.camera.classList.add('frozen');
+  }
+
+  function stopStream() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    els.video.srcObject = null;
+  }
+
+  // An iPhone's camera feed can come through at the wrong size for its first moments.
+  // The picture stays out of sight until its size has held steady, then fades in.
+  async function reveal(my) {
+    let last = '', steady = 0;
+    for (let i = 0; i < 30 && steady < 6; i++) {
+      await wait(100);
+      if (my !== session) return;
+      const now = els.video.videoWidth + 'x' + els.video.videoHeight;
+      steady = els.video.videoWidth && now === last ? steady + 1 : 0;
+      last = now;
     }
-    lost = 0;
-    const vw = els.camView.clientWidth, vh = els.camView.clientHeight, pad = 8;
-    const s = Math.max(vw / frame.width, vh / frame.height);
-    const ox = (vw - frame.width * s) / 2, oy = (vh - frame.height * s) / 2;
-    const clamp = (v, max) => Math.min(max - pad, Math.max(pad, v));
-    const x0 = clamp(ox + rect.x * s, vw), x1 = clamp(ox + (rect.x + rect.w) * s, vw);
-    const y0 = clamp(oy + rect.y * s, vh), y1 = clamp(oy + (rect.y + rect.h) * s, vh);
-    if (x1 - x0 < 60 || y1 - y0 < 60) return; // mostly off screen
-    Object.assign(box.style, { left: x0 + 'px', top: y0 + 'px', width: x1 - x0 + 'px', height: y1 - y0 + 'px' });
-    box.classList.add('on');
+    els.camera.classList.add('live');
   }
 
   const hint = (msg) => { if (els.camHint.textContent !== msg) els.camHint.textContent = msg; };
@@ -653,7 +730,7 @@
 
   // Looks at the camera over and over. When it finds a label and the numbers hold up,
   // it closes the camera by itself and shows the result.
-  const POINT = 'Point at a Nutrition Facts label or a barcode';
+  const POINT = 'Fit the Nutrition Facts label in the frame, or show a barcode';
   let barcodeNote = '';
   let labelInView = false; // while a label is being read, the barcode stays out of the way
 
@@ -695,29 +772,33 @@
       catch (err) { closeCamera(); return setStatus(err.message || 'The label reader stopped. Type the numbers instead.', { warn: true }); }
       if (my !== session || !stream) return;
 
-      showFound(res.rect, frame);
+      els.foundBox.classList.toggle('on', !!res.rect);
       const f = res.found;
-      // Close by itself only when the numbers hold up: both pass the label's own
-      // cross-checks, or (when a check isn't possible) two frames in a row agree.
+      // Close by itself only when the numbers hold up: they are possible at all, and
+      // either both pass the label's own cross-checks or (when a check isn't possible)
+      // two readings in a row agree.
       const disputed = f && f.estimate !== null && !f.calChecked;
-      if (f && complete(f) && f.fatFromDV === null && !disputed && (f.checked || same(f, previous))) {
+      if (f && complete(f) && plausible(f) && f.fatFromDV === null && !disputed && (f.checked || same(f, previous))) {
         hint('Got it');
         els.camera.classList.add('done');
-        await wait(450); // let the brackets around the label be seen
-        if (my !== session || !stream) return;
+        freeze();
+        const mine = ++session; // the watching stops here; only the hand-over is left
+        stopStream();
+        await wait(600); // let the green frame be seen
+        if (mine !== session) return; // closed by hand in the meantime
         window.fatApp.last = res;
         closeCamera();
         return applyResult(res, frame);
       }
-      previous = f && complete(f) ? f : null;
+      previous = f && complete(f) && plausible(f) ? f : null;
       misses = res.rect ? misses + 1 : 0;
       labelInView = !!res.rect && misses <= 2; // a label that won't read lets the barcode back in
       if (labelInView) barcodeNote = '';
       hint(barcodeNote ? barcodeNote
         : !res.rect ? POINT
-        : misses > 2 ? 'The numbers are blurry. Move closer, or tap the shutter.'
+        : misses > 2 ? 'Still not clear. Move closer or hold steadier, or tap the shutter.'
         : 'Label found. Hold still…');
-      await wait(250); // leave the phone a moment to redraw and respond to taps
+      await wait(150);
     }
   }
 
@@ -745,35 +826,45 @@
     hint(POINT);
     barcodeNote = '';
     labelInView = false;
-    lost = 2;
-    showFound(null);
-    els.camera.classList.remove('done');
+    els.foundBox.classList.remove('on');
+    els.camera.classList.remove('done', 'live', 'frozen', 'busy');
+    els.shutter.disabled = false;
     els.camera.hidden = false;
     document.body.classList.add('camera-open');
     els.theme.content = '#000000';
     els.video.play().catch(() => {});
     els.shutter.focus({ preventScroll: true });
     const my = ++session;
+    reveal(my);
     watch(my);
     watchBarcode(my);
   }
 
   function closeCamera() {
     session++;
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    stream = null;
-    els.video.srcObject = null;
+    stopStream();
     els.camera.hidden = true;
     document.body.classList.remove('camera-open');
     els.theme.content = pageColor();
     els.scanBtn.focus({ preventScroll: true });
   }
 
+  // The shutter: read what is in the frame right now, without waiting for the automatic
+  // check. The picture is held on screen while it is read.
   function readNow() {
-    const frame = grabFrame();
+    const frame = grabFrame(0.15);
     if (!frame) return;
-    closeCamera();
-    scan(frame);
+    freeze();
+    const mine = ++session;
+    stopStream();
+    els.camera.classList.add('busy');
+    els.shutter.disabled = true;
+    hint(readerReady || paddleFailed ? 'Reading the label…' : FIRST_LOAD);
+    scan(frame, () => {
+      if (mine !== session) return false; // closed by hand while it was being read
+      closeCamera();
+      return true;
+    });
   }
 
   // ================= text handed over by an iPhone Shortcut =================
@@ -802,8 +893,8 @@
   els.shutter.addEventListener('click', readNow);
   els.camCancel.addEventListener('click', closeCamera);
   els.camPick.addEventListener('click', () => { closeCamera(); els.file.click(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stream) closeCamera(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden && stream) closeCamera(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !els.camera.hidden) closeCamera(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden && !els.camera.hidden) closeCamera(); });
 
   els.pickBtn.addEventListener('click', () => els.file.click());
   els.file.addEventListener('change', () => {
