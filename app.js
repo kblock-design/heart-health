@@ -38,7 +38,7 @@
     const fatCal = fat === null ? null : (fatUnit === 'g' ? fat * 9 : fat);
     els.convLabel.textContent = fatUnit === 'g' ? 'Calories from fat' : 'Fat in grams';
     els.conv.textContent = fat === null ? '0' : (fatUnit === 'g' ? fmt(fatCal) : fmt(fat / 9) + ' g');
-    els.maxFat.textContent = (cal === null ? '0' : fmt(cal * LIMIT / 100 / 9)) + ' g';
+    els.maxFat.textContent = cal === null ? '–' : fmt(cal * LIMIT / 100 / 9) + ' g';
 
     if (cal === null || fat === null) {
       const missing = cal === null && fat === null ? 'Scan a label or barcode, or type the calories and total fat.'
@@ -831,6 +831,7 @@
     els.camera.classList.remove('done', 'live', 'frozen', 'busy');
     els.shutter.disabled = false;
     els.camera.hidden = false;
+    $('main').inert = true; // keeps VoiceOver and the keyboard inside the camera
     document.body.classList.add('camera-open');
     els.theme.content = '#000000';
     els.video.play().catch(() => {});
@@ -845,6 +846,7 @@
     session++;
     stopStream();
     els.camera.hidden = true;
+    $('main').inert = false;
     document.body.classList.remove('camera-open');
     els.theme.content = pageColor();
     els.scanBtn.focus({ preventScroll: true });
@@ -888,6 +890,10 @@
   // ================= wiring =================
   els.cal.addEventListener('input', () => { els.cal.classList.remove('check'); calc(); });
   els.fat.addEventListener('input', () => { els.fat.classList.remove('check'); calc(); });
+  for (const box of [els.cal, els.fat]) {
+    box.addEventListener('focus', () => box.select()); // typing replaces a scanned number
+    box.addEventListener('keydown', (e) => { if (e.key === 'Enter') box.blur(); }); // "Done" puts the keyboard away
+  }
   els.unitG.addEventListener('click', () => setUnit('g'));
   els.unitCal.addEventListener('click', () => setUnit('cal'));
   els.scanBtn.addEventListener('click', openCamera);
