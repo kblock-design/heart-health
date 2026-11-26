@@ -1,6 +1,6 @@
 ﻿{
-  "name": "Fat Facts",
-  "short_name": "Fat Facts",
+  "name": "Heart Health Calculator",
+  "short_name": "Heart Health",
   "description": "Scan a nutrition label and see what percent of its calories come from fat.",
   "start_url": ".",
   "scope": ".",

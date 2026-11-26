@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Fat Facts</title>
+<title>Heart Health Calculator</title>
 <meta name="description" content="Scan a nutrition label and see what percent of its calories come from fat.">
 <meta name="theme-color" id="themeColor" content="#e7e9e2">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Fat Facts">
+<meta name="apple-mobile-web-app-title" content="Heart Health">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" href="icon-192.png">
@@ -63,7 +63,7 @@
   .panel { background: var(--paper); color: var(--ink); border: 2px solid var(--ink); padding: 6px 12px 10px; }
   .title {
     margin: 0; font-weight: 900; line-height: .95; letter-spacing: -.035em;
-    font-size: clamp(40px, 14.4vw, 62px); font-variant-numeric: tabular-nums;
+    font-size: clamp(32px, 11vw, 48px); font-variant-numeric: tabular-nums; /* sized so "Heart Health" fills one line */
   }
   .has-result .title { font-size: clamp(64px, 23vw, 100px); letter-spacing: -.05em; line-height: .88; padding-top: 4px; }
   .lede { margin: 4px 0 8px; font-size: 17px; }
@@ -200,7 +200,7 @@
 <main>
   <section class="panel" id="panel">
     <div aria-live="polite">
-      <h1 class="title" id="pct">Fat Facts</h1>
+      <h1 class="title" id="pct">Heart Health Calculator</h1>
       <p class="lede" id="lede">Scan a label or barcode, or type the calories and total fat.</p>
       <div class="verdict" id="verdict"></div>
     </div>

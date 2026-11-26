@@ -1,4 +1,5 @@
 (() => {
+  const NAME = 'Heart Health Calculator';
   const LIMIT = 20; // percent of calories from fat
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -42,12 +43,12 @@
     if (cal === null || fat === null) {
       const missing = cal === null && fat === null ? 'Scan a label or barcode, or type the calories and total fat.'
         : cal === null ? 'Add the calories to see the result.' : 'Add the total fat to see the result.';
-      return show('', 'Fat Facts', missing, '');
+      return show('', NAME, missing, '');
     }
     if (cal === 0 && fatCal === 0) return show('pass', '0%', 'of calories from fat', `✓ At or under the ${LIMIT}% limit`);
     const pct = cal === 0 ? Infinity : (fatCal / cal) * 100;
     // Rounding on real labels can push fat a little past the total (cooking spray, oils).
-    if (pct > 115) return show('', 'Fat Facts', 'The fat adds up to more calories than the total. Check both numbers.', '');
+    if (pct > 115) return show('', NAME, 'The fat adds up to more calories than the total. Check both numbers.', '');
     const pass = pct <= LIMIT;
     show(pass ? 'pass' : 'fail', fmt(Math.min(pct, 100)) + '%', 'of calories from fat',
       pass ? `✓ At or under the ${LIMIT}% limit` : `✕ Over the ${LIMIT}% limit`);
