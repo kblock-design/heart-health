@@ -1,7 +1,7 @@
 ﻿// Keeps the app working with weak or no signal (e.g. inside a grocery store)
 // once it has been opened online at least once.
-const CACHE = 'fat-pct-v2';
-const SHELL = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
+const CACHE = 'fat-pct-v3';
+const SHELL = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

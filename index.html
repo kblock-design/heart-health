@@ -127,12 +127,18 @@
   }
   /* ---------- in-app camera ---------- */
   .camera { position: fixed; inset: 0; z-index: 10; background: #000; color: #fff; display: flex; flex-direction: column; }
+  .camera .view { position: relative; flex: 1; overflow: hidden; }
   .camera video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .camera .hint {
-    position: relative; margin: 0; padding: max(16px, env(safe-area-inset-top)) 16px 12px;
-    font-weight: 800; font-size: 19px; text-align: center; background: #000;
+    margin: 0; padding: max(16px, env(safe-area-inset-top)) 16px 12px; min-height: 76px;
+    font-weight: 800; font-size: 19px; line-height: 1.25; text-align: center; background: #000;
   }
-  .camera .frame { position: relative; flex: 1; margin: 18px; border: 3px solid #fff; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .45); }
+  /* Drawn around the label once the app has found it; everything else dims. */
+  .camera .found {
+    position: absolute; border: 4px solid #fff; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .5);
+    pointer-events: none; transition: left .15s, top .15s, width .15s, height .15s;
+  }
+  .camera .manual { justify-self: end; max-width: 9ch; text-align: right; font-size: 14px; line-height: 1.2; }
   .camera .bar {
     position: relative; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
     padding: 14px 16px max(18px, env(safe-area-inset-bottom)); background: #000;
@@ -201,330 +207,19 @@
 </main>
 
 <div class="camera" id="camera" role="dialog" aria-modal="true" aria-label="Scan a label" hidden>
-  <video id="video" playsinline muted autoplay></video>
-  <p class="hint">Fill the box with the label, then tap the button</p>
-  <div class="frame" aria-hidden="true"></div>
+  <p class="hint" id="camHint" aria-live="polite">Point the camera at a Nutrition Facts label</p>
+  <div class="view" id="camView">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="found" id="foundBox" hidden></div>
+  </div>
   <div class="bar">
     <button class="cancel" id="camCancel" type="button">Cancel</button>
-    <button class="shutter" id="shutter" type="button" aria-label="Read this label"></button>
+    <button class="shutter" id="shutter" type="button" aria-label="Read the label now"></button>
+    <span class="manual">Tap to read it now</span>
   </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
-<script>
-(() => {
-  const LIMIT = 20; // percent of calories from fat
-  const $ = (id) => document.getElementById(id);
-  const els = {
-    panel: $('panel'), pct: $('pct'), lede: $('lede'), verdict: $('verdict'),
-    cal: $('cal'), fat: $('fat'), unitG: $('unitG'), unitCal: $('unitCal'),
-    convLabel: $('convLabel'), conv: $('conv'), maxFat: $('maxFat'), clear: $('clearBtn'),
-    status: $('status'), statusText: $('statusText'), thumb: $('thumb'), bar: $('barFill'),
-    scanBtn: $('scanBtn'), pickBtn: $('pickBtn'), file: $('fileInput'),
-    camera: $('camera'), video: $('video'), shutter: $('shutter'), camCancel: $('camCancel'),
-    theme: $('themeColor'),
-  };
-  let fatUnit = 'g';
-
-  // ---------- math ----------
-  const num = (s) => {
-    const v = parseFloat(String(s).replace(',', '.'));
-    return Number.isFinite(v) && v >= 0 ? v : null;
-  };
-  const fmt = (v) => (Math.round(v * 10) / 10).toString();
-
-  function show(state, title, lede, verdict) {
-    document.body.className = state;
-    els.panel.className = 'panel ' + state + (state ? ' has-result' : '');
-    els.pct.textContent = title;
-    els.lede.textContent = lede;
-    els.verdict.textContent = verdict;
-    els.theme.content = getComputedStyle(document.body).getPropertyValue('--page').trim();
-  }
-
-  function calc() {
-    const cal = num(els.cal.value), fat = num(els.fat.value);
-    els.clear.hidden = els.cal.value === '' && els.fat.value === '';
-
-    const fatCal = fat === null ? null : (fatUnit === 'g' ? fat * 9 : fat);
-    els.convLabel.textContent = fatUnit === 'g' ? 'Calories from fat' : 'Fat in grams';
-    els.conv.textContent = fat === null ? '0' : (fatUnit === 'g' ? fmt(fatCal) : fmt(fat / 9) + ' g');
-    els.maxFat.textContent = (cal === null ? '0' : fmt(cal * LIMIT / 100 / 9)) + ' g';
-
-    if (cal === null || fat === null) {
-      const missing = cal === null && fat === null ? 'Scan a label, or type its calories and total fat.'
-        : cal === null ? 'Add the calories to see the result.' : 'Add the total fat to see the result.';
-      return show('', 'Fat Facts', missing, '');
-    }
-    if (cal === 0 && fatCal === 0) return show('pass', '0%', 'of calories from fat', `✓ At or under the ${LIMIT}% limit`);
-    const pct = cal === 0 ? Infinity : (fatCal / cal) * 100;
-    // Rounding on real labels can push fat a little past the total (cooking spray, oils).
-    if (pct > 115) return show('', 'Fat Facts', 'The fat adds up to more calories than the total. Check both numbers.', '');
-    const pass = pct <= LIMIT;
-    show(pass ? 'pass' : 'fail', fmt(Math.min(pct, 100)) + '%', 'of calories from fat',
-      pass ? `✓ At or under the ${LIMIT}% limit` : `✕ Over the ${LIMIT}% limit`);
-  }
-
-  function setUnit(u) {
-    fatUnit = u;
-    els.unitG.setAttribute('aria-pressed', u === 'g');
-    els.unitCal.setAttribute('aria-pressed', u === 'cal');
-    calc();
-  }
-
-  // ---------- reading numbers out of OCR text ----------
-  const DIGITISH = '[0-9OoIl|]';
-  const fixDigits = (s) => s.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1').replace(',', '.');
-
-  function parseLabel(text) {
-    const out = { calories: null, fatG: null, fatCal: null };
-    const t = text.replace(/\r/g, '');
-
-    // Older labels: "Calories from Fat 110"
-    let m = /calories\s*from\s*fat\D{0,6}?(\d{1,4})/i.exec(t);
-    if (m) out.fatCal = Number(m[1]);
-
-    // "Calories 230" (skip "Calories from Fat" and the "2,000 calorie diet" footnote)
-    const calRe = /calories(?!\s*from)(?!\s*per\s*gram)[^\d]{0,20}?(\d{1,4})(?![\d]*,\d{3})/gi;
-    while ((m = calRe.exec(t))) {
-      const v = Number(m[1]);
-      if (v <= 2500) { out.calories = v; break; }
-    }
-    // UK/EU style: "Energy 250 kcal"
-    if (out.calories === null && (m = /(\d{1,4})\s*kcal/i.exec(t))) out.calories = Number(m[1]);
-
-    // "Total Fat 8g 10%"
-    const fatRe = new RegExp(
-      `(?:total\\s*fat|^\\s*fat)\\s*[:.]?\\s*(${DIGITISH}+(?:[.,]${DIGITISH}+)?)\\s*(mg|g|q)?(?=\\s|\\d*\\s*%|$)([^\\n]*)`, 'im');
-    m = fatRe.exec(t);
-    if (m) {
-      // OCR makes two common mistakes here: it reads the "g" as a 9 ("8g" -> "89",
-      // "2.5g" -> "2.59") and it splits digits apart ("19g" -> "1 9g"). So collect
-      // every plausible reading, then let the % Daily Value on the same line decide.
-      const cands = [];
-      const add = (rawNum, unit) => {
-        let v = parseFloat(rawNum);
-        if (!Number.isFinite(v)) return;
-        if (unit === 'mg') v /= 1000;
-        const decimals = (rawNum.split('.')[1] || '').length;
-        if (decimals < 2) cands.push(v);                       // labels never print 2 decimals
-        if (!unit && /\d9$/.test(rawNum)) cands.push(parseFloat(rawNum.slice(0, -1)));
-      };
-      const unit = (m[2] || '').toLowerCase();
-      add(fixDigits(m[1]), unit);
-
-      const rest = m[1] + (m[2] || '') + (m[3] || '');
-      const dv = /(\d{1,3})\s*%/.exec(m[3] || '');
-      if (dv) {
-        const seg = rest.slice(0, rest.lastIndexOf(dv[0]));
-        const joined = /^(\d+(?:\.\d+)?)(mg|g|q)?$/i.exec(fixDigits(seg.replace(/\s+/g, '')));
-        if (joined) add(joined[1], (joined[2] || '').toLowerCase());
-        const want = Number(dv[1]);
-        // Daily value for fat is 78 g on current labels and was 65 g on older ones.
-        const err = (x) => Math.min(Math.abs(x / 78 * 100 - want), Math.abs(x / 65 * 100 - want));
-        cands.sort((a, b) => err(a) - err(b));
-      } else if (cands.length > 1 && out.calories !== null && cands[0] * 9 > out.calories * 1.1) {
-        cands.reverse();
-      }
-      if (cands.length) out.fatG = cands[0];
-    }
-
-    // Cross-check: carbs and protein have 4 calories per gram, fat has 9. If the label's
-    // own numbers add up to something far from the calories we read, say so.
-    const grams = (re) => { const g = re.exec(t); return g ? parseFloat(g[1]) : null; };
-    const carb = grams(/total\s*carb[a-z.]*\s*(\d{1,3}(?:\.\d)?)\s*g\b/i);
-    const protein = grams(/protein\s*(\d{1,3}(?:\.\d)?)\s*g\b/i);
-    if (carb !== null && protein !== null && out.fatG !== null) out.estimate = Math.round(carb * 4 + protein * 4 + out.fatG * 9);
-    return out;
-  }
-
-  // ---------- scanning ----------
-  let workerPromise = null;
-  function setStatus(msg, { warn = false, busy = false, progress = null } = {}) {
-    els.status.classList.add('show');
-    els.status.classList.toggle('warn', warn);
-    els.status.classList.toggle('busy', busy);
-    els.statusText.textContent = msg;
-    if (progress !== null) els.bar.style.width = Math.round(progress * 100) + '%';
-  }
-
-  function getWorker() {
-    if (!window.Tesseract) return Promise.reject(new Error('The label reader didn’t load. Connect to the internet and reload, or type the numbers.'));
-    if (!workerPromise) {
-      workerPromise = Tesseract.createWorker('eng', 1, {
-        logger: (m) => {
-          if (!els.status.classList.contains('busy')) return;
-          if (m.status === 'recognizing text') setStatus('Reading the label…', { busy: true, progress: m.progress });
-          else if (/load/.test(m.status)) setStatus('Setting up the label reader. This happens once.', { busy: true, progress: m.progress || 0 });
-        },
-      });
-      workerPromise.catch(() => { workerPromise = null; });
-    }
-    return workerPromise;
-  }
-
-  // Small text is where digits get misread, so bring every photo to a size where
-  // label text is comfortably large: shrink huge photos, enlarge small ones.
-  function sized(src, w, h) {
-    const long = Math.max(w, h);
-    const scale = Math.min(2200, Math.max(1700, long)) / long;
-    const c = document.createElement('canvas');
-    c.width = Math.round(w * scale);
-    c.height = Math.round(h * scale);
-    const ctx = c.getContext('2d');
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(src, 0, 0, c.width, c.height);
-    return c;
-  }
-
-  async function fileToCanvas(file) {
-    const url = URL.createObjectURL(file);
-    try {
-      const img = new Image();
-      img.src = url;
-      await img.decode();
-      return sized(img, img.naturalWidth, img.naturalHeight);
-    } finally {
-      URL.revokeObjectURL(url);
-    }
-  }
-
-  async function scan(source) {
-    els.scanBtn.disabled = els.pickBtn.disabled = true;
-    els.thumb.hidden = true;
-    setStatus('Opening the photo…', { busy: true, progress: 0 });
-    try {
-      const canvas = source instanceof HTMLCanvasElement ? sized(source, source.width, source.height) : await fileToCanvas(source);
-      els.thumb.src = canvas.toDataURL('image/jpeg', 0.6);
-      els.thumb.hidden = false;
-      const worker = await getWorker();
-      window.fatApp.lastTexts = [];
-      const found = { calories: null, fatG: null, fatCal: null, estimate: null };
-      const done = () => found.calories !== null && (found.fatG !== null || found.fatCal !== null);
-      // Try a few page layouts; labels photographed at an angle read differently in each.
-      for (const psm of ['6', '11', '3']) {
-        await worker.setParameters({ tessedit_pageseg_mode: psm });
-        const { data } = await worker.recognize(canvas);
-        window.fatApp.lastTexts.push(data.text);
-        const p = parseLabel(data.text);
-        for (const k of Object.keys(found)) if (found[k] === null) found[k] = p[k];
-        if (done()) break;
-      }
-      applyScan(found);
-      return found;
-    } catch (err) {
-      setStatus(err && err.message ? err.message : 'That photo couldn’t be read. Scan again, or type the numbers.', { warn: true });
-    } finally {
-      els.scanBtn.disabled = els.pickBtn.disabled = false;
-    }
-  }
-
-  function applyScan(found) {
-    const hasFat = found.fatG !== null || found.fatCal !== null;
-    if (found.calories !== null) els.cal.value = found.calories;
-    if (found.fatCal !== null) { els.fat.value = found.fatCal; setUnit('cal'); }
-    else if (found.fatG !== null) { els.fat.value = found.fatG; setUnit('g'); }
-    calc();
-    const est = found.estimate;
-    if (found.calories !== null && hasFat && est != null && Math.abs(est - found.calories) > Math.max(30, found.calories * 0.35)) {
-      setStatus(`Read ${found.calories} calories, but the carbs, protein and fat on the label add up to about ${est}. Check the calories against the label.`, { warn: true });
-      els.cal.focus();
-    } else if (found.calories !== null && hasFat) {
-      const fatTxt = found.fatCal !== null ? `${found.fatCal} calories from fat` : `${found.fatG} g of fat`;
-      setStatus(`Read ${found.calories} calories and ${fatTxt}. Check them against the label.`);
-    } else if (found.calories === null && !hasFat) {
-      setStatus('No numbers found in that photo. Move closer, avoid glare and scan again, or type them in.', { warn: true });
-    } else {
-      const missing = found.calories === null ? 'calories' : 'total fat';
-      setStatus(`The ${missing} didn’t come through. Type it in, or scan again.`, { warn: true });
-      (found.calories === null ? els.cal : els.fat).focus();
-    }
-  }
-
-  // ---------- wiring ----------
-  els.cal.addEventListener('input', calc);
-  els.fat.addEventListener('input', calc);
-  els.unitG.addEventListener('click', () => setUnit('g'));
-  els.unitCal.addEventListener('click', () => setUnit('cal'));
-  // ---------- in-app camera ----------
-  // The live camera runs inside the page. Tapping the button copies one video frame
-  // into memory for reading; nothing is saved to the phone's photos or sent anywhere.
-  let stream = null;
-
-  async function openCamera() {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      return setStatus('This browser can’t open the camera here. Use the photo button, or type the numbers.', { warn: true });
-    }
-    els.scanBtn.disabled = true;
-    els.thumb.hidden = true;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-      });
-    } catch (err) {
-      els.scanBtn.disabled = false;
-      const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
-      return setStatus(denied
-        ? 'The camera is turned off for this app. Allow it in your browser’s site settings, or type the numbers.'
-        : 'The camera didn’t start. Use the photo button, or type the numbers.', { warn: true });
-    }
-    els.scanBtn.disabled = false;
-    els.video.srcObject = stream;
-    els.camera.hidden = false;
-    document.body.classList.add('camera-open');
-    els.video.play().catch(() => {});
-    els.shutter.focus();
-  }
-
-  function closeCamera() {
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    stream = null;
-    els.video.srcObject = null;
-    els.camera.hidden = true;
-    document.body.classList.remove('camera-open');
-    els.scanBtn.focus();
-  }
-
-  function capture() {
-    const w = els.video.videoWidth, h = els.video.videoHeight;
-    if (!w || !h) return; // camera still starting
-    const frame = document.createElement('canvas');
-    frame.width = w; frame.height = h;
-    frame.getContext('2d').drawImage(els.video, 0, 0, w, h);
-    closeCamera();
-    scan(frame);
-  }
-
-  els.scanBtn.addEventListener('click', openCamera);
-  els.shutter.addEventListener('click', capture);
-  els.camCancel.addEventListener('click', closeCamera);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stream) closeCamera(); });
-  document.addEventListener('visibilitychange', () => { if (document.hidden && stream) closeCamera(); });
-
-  els.pickBtn.addEventListener('click', () => els.file.click());
-  els.file.addEventListener('change', () => {
-    const f = els.file.files && els.file.files[0];
-    els.file.value = '';
-    if (f) scan(f);
-  });
-  els.clear.addEventListener('click', () => {
-    els.cal.value = els.fat.value = '';
-    els.status.classList.remove('show');
-    setUnit('g');
-  });
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', calc);
-
-  // Warm up the label reader in the background so the first scan is quick.
-  window.addEventListener('load', () => setTimeout(() => getWorker().catch(() => {}), 800));
-
-  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
-
-  window.fatApp = { parseLabel, scan, lastTexts: [] };
-  calc();
-})();
-</script>
+<script src="app.js" defer></script>
 </body>
 </html>
